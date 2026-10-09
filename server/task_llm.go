@@ -573,6 +573,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetTrafficRecording(s.m.TrafficEnabled())
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
+	wk.SetSmartProxy(s.m.smart)                      // 智能代理：worker 可标记被拦截主机
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.evidenceStore())
@@ -583,6 +584,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)
 	pl.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())
+	pl.SetSmartProxy(s.m.smart) // 智能代理：per-task planner 可标记被拦截主机
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开)
 	// cold-digest §7: 冷节点后台压缩。引擎经权威解析器实际驱动的就是这套 per-task planner
@@ -598,6 +600,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetNonStreaming(mainRuntime.nonStreaming)
 	main.SetMaxTokens(mainRuntime.maxTokens)
 	main.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())
+	main.SetSmartProxy(s.m.smart) // 智能代理：per-task 主 agent 可标记被拦截主机
 	main.SetNoaEnabled(s.m.NoaCompactionEnabled)
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
