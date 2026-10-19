@@ -2,3 +2,29 @@
 /dist/
 /server/webui/dist/
 .DS_Store
+
+# SERIES local development ignores (kept from local fork)
+# Scope: only files that this machine's local workflow creates.
+
+# Local runtime state (embedded PostgreSQL data, logs — tens of GB)
+/.runtime/
+
+# Runtime data stores (SQLite traffic index, transcripts, task artifacts)
+/data/
+
+# Local database connection config (host/port/credentials)
+/config.json
+
+# JWT signing key (generated at first start)
+/jwt.key
+
+# Local development launcher scripts
+/start-dev.bat
+/stop-dev.bat
+
+# Locally built binaries
+/series
+/series.exe
+/series.exe.bak-*
+/series.exe~
+/series-test.exe
