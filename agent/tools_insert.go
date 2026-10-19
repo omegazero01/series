@@ -814,7 +814,7 @@ func (t *ToolSet) mainAgentTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.markHostProxy(), t.checkHostProxy(),
 		t.listTaskAssets(), t.checkTargetAccess(), t.dispatchIntents(), t.graphOverview(), t.contextSearch(), t.contextGet(),
-		t.addHint(), t.addIntent(), t.steerWorkTool(), t.setGoals(), t.setConstraints(),
+		t.addHint(), t.addIntent(), t.cancelIntentTool(), t.steerWorkTool(), t.setGoals(), t.setConstraints(),
 		t.insertAssets(), t.addCompanyScope(), t.assetSearch(), t.assetGet(), t.addFinding(), t.recordFact(), t.addTaskScope(),
 	}
 }

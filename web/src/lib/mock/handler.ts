@@ -2,6 +2,7 @@
 // 未命中的一律返回安全默认（[] / {} / {ok:true}），保证任何页面都不崩。
 // 只在 NEXT_PUBLIC_MOCK=1 时经由 api.ts 的 http() 短路进入这里。
 import type { NotificationQuery } from "../task-notifications";
+import { FINDING_STATUSES, SEVERITIES } from "../findings";
 import { MockNotificationLedger, type MockNotificationRecord } from "./task-notifications";
 
 const notificationLedger = new MockNotificationLedger();
@@ -2980,9 +2981,16 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         !["asc", "desc"].includes(direction)
       )
         throw new Error("invalid pagination");
+      const query = (q.get("q") ?? "").trim().toLowerCase();
+      const severity = q.get("severity") ?? "all", status = q.get("status") ?? "all", scope = q.get("scope") ?? "all";
+      if (Array.from(q.get("q") ?? "").length > 200 || !["all", "local", "inherited"].includes(scope)
+        || !["all", ...SEVERITIES].includes(severity) || !["all", ...FINDING_STATUSES].includes(status)) throw new Error("invalid filter");
       const sources = new Set(owner.source_task_ids ?? []);
       const items = [...mockFindings.map((f) => ({ ...f, finding_id: f.id })), ...mockLegacyFindings]
         .filter((f) => f.task_id === context || (!!f.task_id && sources.has(f.task_id)))
+        .filter((f) => (severity === "all" || f.severity === severity) && (status === "all" || f.status === status)
+          && (scope === "all" || (scope === "local" ? f.task_id === context : f.task_id !== context))
+          && (!query || [f.name, f.summary, f.vulnclass].filter(Boolean).join(" ").toLowerCase().includes(query)))
         .sort(
           (a, b) =>
             (Date.parse(a.ts) - Date.parse(b.ts) || a.id.localeCompare(b.id, undefined, { numeric: true })) *
@@ -3044,11 +3052,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (q.has("page")) {
       const before = Number(q.get("before") ?? 0);
       const limit = Math.max(1, Number(q.get("limit") ?? 300));
-      let list = mockIntents;
+      let list = task?.startsWith("t-new-") ? [] : mockIntents;
       if (before > 0) list = list.filter((intent) => Number(intent.id.replace(/\D/g, "") || intent.id) < before);
       return { items: list.slice(0, limit), has_more: list.length > limit };
     }
-    return mockIntents;
+    return task?.startsWith("t-new-") ? [] : mockIntents;
   }
   if (path === "/exploration/tokens") {
     const selectedTask = task ? mockTasks.find((item) => item.id === task) : undefined;
@@ -3058,7 +3066,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       total: selectedTask?.tokens ?? D.tokenTotal,
     };
   }
-  if (path === "/exploration/graph") return D.explorationGraph;
+  if (path === "/exploration/graph") return task?.startsWith("t-new-") ? { nodes: [], edges: [] } : D.explorationGraph;
   if (path === "/exploration/main-sessions" && m === "GET") {
     const sessions = mockMainSessions.get(q.get("task") ?? "") ?? [];
     return { sessions: [...sessions, { seq: 0, created_at: "" }], current: sessions[0]?.seq ?? 0 };
@@ -3124,7 +3132,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/exploration/activity" && seg.length === 2) {
     const since = Number(q.get("since") ?? 0);
     const limit = Math.max(1, Number(q.get("limit") ?? 300));
-    const items = mockActivity.filter((item) => item.seq > since).slice(0, limit);
+    const items = (task?.startsWith("t-new-") ? [] : mockActivity).filter((item) => item.seq > since).slice(0, limit);
     return { items, cursor: items.length ? items[items.length - 1].seq : since };
   }
   if (path === "/exploration/activity/search") {

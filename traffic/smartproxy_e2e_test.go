@@ -17,9 +17,9 @@ import (
 // feature works against go-mitmproxy's real callback ordering.
 //
 // It covers the three states that matter:
-//   1. unmarked            -> direct dial
-//   2. marked for task A   -> routed to the pool
-//   3. same host, task B   -> still direct (per-task isolation)
+//  1. unmarked            -> direct dial
+//  2. marked for task A   -> routed to the pool
+//  3. same host, task B   -> still direct (per-task isolation)
 func TestSmartProxyEndToEnd(t *testing.T) {
 	// A stand-in egress proxy that counts what reaches it, then answers 200.
 	var poolHits atomic.Int64

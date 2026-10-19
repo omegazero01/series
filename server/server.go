@@ -447,7 +447,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.evidenceStore())
-	pl.SetKillWork(s.engine.KillWork)                       // planner kill_work → terminate a running work
+	pl.SetKillWork(s.engine.KillWork)                       // planner kill_work → stop queued/running intent
 	pl.SetSteerWork(s.engine.SteerWork)                     // planner steer_work → inject mid-run course-correction
 	pl.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert()) // WebFetch through the task policy proxy
 	pl.SetWebSearch(s.webSearchFor("planner"))
@@ -533,6 +533,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert()) // WebFetch through the task policy proxy
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
 	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
+	s.mainAgent.SetCancelIntent(s.cancelIntentFromMain)
 	s.mainAgent.SetNonStreaming(nonStreamingResolver(mCfg))
 	s.mainAgent.SetMaxTokens(maxTokensResolver(mCfg))
 	s.mainAgent.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
@@ -785,13 +786,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
-
-	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
-	// /api/health），所以这几个改动程序自身的接口天然需要登录。
-	mux.HandleFunc("GET /api/update/check", s.updateCheck)
-	mux.HandleFunc("POST /api/update/apply", s.updateApply)
-	mux.HandleFunc("POST /api/update/rollback", s.updateRollback)
-	mux.HandleFunc("GET /api/update/stream", s.updateStream)
 
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("GET /api/tasks/notifications", s.taskNotifications)
@@ -1260,8 +1254,8 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 }
 
 // controlIntent pauses, resumes, or cancels one local worker intent. A running
-// worker is always stopped before state mutation/cleanup, preventing tool output
-// that arrives after the user action from recreating deleted blackboard records.
+// worker stops writing before the cancellation reason and execution lock are
+// persisted; the intent and its existing output are retained.
 func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
@@ -3473,7 +3467,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"web_search_backend":       backend,
 		"brave_key_set":            strings.TrimSpace(braveKey) != "",
 		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":         proxy,             // 独立出口代理(http/https/socks5)，空=直连
+		"web_search_proxy":         proxy,                                      // 独立出口代理(http/https/socks5)，空=直连
 		"global_proxy":             s.m.GlobalProxy(),                          // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
 		"smart_proxy":              s.m.SmartProxyEnabled(),                    // 智能代理：按请求决定是否走代理池(默认关)
 		"smart_proxy_pool":         s.m.SmartProxyPool(),                       // 智能代理使用的代理池地址(空=已标记主机仍直连)

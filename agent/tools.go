@@ -121,9 +121,9 @@ type ToolSet struct {
 	writes          WriteCounts
 	mainExecution   bool // set only by the trusted task MainAgent runtime
 	workerExecution bool // set only by Worker.execute, never by tool arguments/catalog
-	// killWork, if set, terminates a running work by intent id (engine callback,
-	// wired by the planner). nil = the kill_work tool reports unavailable.
-	killWork func(intentID int64) error
+	// Task-scoped host callbacks; nil means the corresponding tool is unavailable.
+	killWork     IntentStopper
+	cancelIntent IntentStopper
 	// steerWork, if set, queues a mid-run course-correction for the work running an
 	// intent id (engine callback, wired by the planner): the worker injects it before
 	// its next tool call and re-plans, without being killed. nil = tool unavailable.
@@ -259,21 +259,37 @@ func (t *ToolSet) StripCoverageParams(tools []actool.CoreTool) []actool.CoreTool
 	if !t.coverageDisabled {
 		return tools
 	}
-	for i, tool := range tools {
+	out := make([]actool.CoreTool, 0, len(tools))
+	for _, tool := range tools {
 		if tool.Name() != "insert_assets" && tool.Name() != "asset_search" {
+			out = append(out, tool)
 			continue
 		}
 		schema := deepCopyJSONMap(tool.InputSchema())
+		desc := tool.Description()
 		if tool.Name() == "asset_search" {
+			untestedOnly := false
+			if required, ok := schema["required"].([]any); ok {
+				for _, key := range required {
+					untestedOnly = untestedOnly || key == "untested"
+				}
+			}
+			if untestedOnly {
+				// A migrated coverage-only reader has no usable mode while coverage
+				// is off. Do not expose a schema requiring a removed property.
+				continue
+			}
 			if props, ok := nestedMap(schema, "properties"); ok {
 				delete(props, "untested")
 			}
+			schema["required"] = []string{"dsl"}
+			desc = "检索当前角色授权可见的资产摘要，必须提供非空dsl；本任务已关闭覆盖度，不提供未测试筛选。默认页长见limit.default，最多50条；保持筛选条件用next_offset续页。任务范围及资产审批过滤仍生效。"
 		} else if props, ok := nestedMap(schema, "properties", "assets", "items", "properties"); ok {
 			delete(props, "related")
 		}
-		tools[i] = DecorateTool(tool, tool.Description(), schema)
+		out = append(out, DecorateTool(tool, desc, schema))
 	}
-	return tools
+	return out
 }
 
 // deepCopyJSONMap returns a JSON round-trip deep copy of a schema map so callers can
@@ -453,7 +469,7 @@ func jsonResult(v any) (actool.Result, error) {
 // --- read tools (planner + worker) ---
 
 func (t *ToolSet) graphOverview() actool.CoreTool {
-	return readTool("graph_overview", "任务态势摘要。Planner 每轮已预取，仅需刷新时调用。", obj(map[string]any{"task_id": contextTaskSchema()}), func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
+	return readTool("graph_overview", "任务态势窗口。sections给出shown、has_more（null表示未知）及读取入口；省略字段按omitted_fields读取，未展示不代表不存在。Planner每轮已预取，仅需刷新时调用。", obj(map[string]any{"task_id": contextTaskSchema()}), func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
 		var a struct {
 			TaskID contextTaskID `json:"task_id"`
 		}
@@ -464,7 +480,7 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		return jsonResult(target.graphOverviewData())
+		return contextJSON(ctx, boundedGraphOverview(target.graphOverviewData(), plannerOverviewRunes, readOutputBudget(ctx), string(a.TaskID)))
 	})
 }
 
@@ -671,7 +687,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		out["cold_digests"] = cds
 	}
 	if len(more) > 0 {
-		out["cold_digests_more"] = more
+		out["cold_digests_more"] = more[:min(50, len(more))]
+		out["cold_digests_has_more"] = true
+		out["cold_digests_read"] = overviewRead("cold_digests")
 	}
 	// the original task (root) so the planner always has it, not just the
 	// decomposed goals.
@@ -1122,7 +1140,9 @@ func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
 				item["cold_digests"] = cds
 			}
 			if len(more) > 0 {
-				item["cold_digests_more"] = more
+				item["cold_digests_more"] = more[:min(50, len(more))]
+				item["cold_digests_has_more"] = true
+				item["cold_digests_read"] = overviewRead("cold_digests")
 			}
 		}
 		if statsErr == nil && t.as == nil {
@@ -2334,44 +2354,12 @@ func (t *ToolSet) addHint() actool.CoreTool {
 		})
 }
 
-// killWorkTool lets the planner terminate a single running work (by intent id).
-func (t *ToolSet) killWorkTool() actool.CoreTool {
-	return t.writeExpTool("kill_work", "终止一条正在运行的意图(work)。用于叫停跑偏/无意义的探索；被终止的意图标记为 stopped，不再自动重领。先用 context_get 的 output 视图了解当前进度。",
-		obj(map[string]any{"intent_id": idp("要终止的意图 id（= work 句柄）")}, "intent_id"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			if t.killWork == nil {
-				return actool.Errorf("kill_work 当前不可用"), nil
-			}
-			var a struct {
-				IntentID json.RawMessage `json:"intent_id"`
-			}
-			if err := json.Unmarshal(in, &a); err != nil {
-				return actool.Errorf("参数格式错误: " + err.Error()), nil
-			}
-			id := pid(a.IntentID)
-			if id <= 0 {
-				return actool.Errorf("intent_id 必填"), nil
-			}
-			node, err := t.ts.GetNode(id)
-			if err != nil || node == nil || node.Kind != db.KindIntent {
-				return actool.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）"), nil
-			}
-			if !t.nodeAuthorized(node) {
-				return actool.Errorf("该意图关联的任务资产未获授权或已被封禁"), nil
-			}
-			if err := t.killWork(id); err != nil {
-				return actool.Errorf(err.Error()), nil
-			}
-			return actool.Text(fmt.Sprintf("已向意图 %d 的 work 发送终止信号", id)), nil
-		})
-}
-
 // steerWorkTool lets the planner inject a mid-run course-correction into a running
 // work WITHOUT killing it: the message reaches the worker before its next tool call,
 // which re-plans its next step (already-gathered context is kept). For in-intent
 // nudges ("停做 X、聚焦 Y"); if the whole direction is wrong use kill_work + a new intent.
 func (t *ToolSet) steerWorkTool() actool.CoreTool {
-	return t.writeExpTool("steer_work", "给一条正在运行的意图(work)实时注入纠偏指令，不打断它、不丢已有进展：worker 会在下一步动作前收到你的指令并据此调整。用于'别再走 X、聚焦 Y'这类【意图内】纠偏；若方向整个错了应改用 kill_work 再下新意图。建议先用 context_get 的 output 视图了解当前进度。",
+	return t.writeExpTool("steer_work", "给一条正在运行的意图(work)实时注入纠偏指令，不打断它、不丢已有进展：worker 会在下一步动作前收到你的指令并据此调整。用于'别再走 X、聚焦 Y'这类【意图内】纠偏；需要停止执行时，使用当前角色的意图取消或终止工具。建议先用 context_get 的 output 视图了解当前进度。",
 		obj(map[string]any{
 			"intent_id": idp("要纠偏的意图 id（= work 句柄）"),
 			"message":   str("给 worker 的纠偏指令，明确让它停止什么、转向什么"),

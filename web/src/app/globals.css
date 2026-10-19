@@ -2,23 +2,17 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-/* Theme preset styles: these override CSS variables based on the selected data-theme-preset */
-@import "../styles/presets/brutalist.css";
-@import "../styles/presets/soft-pop.css";
-@import "../styles/presets/tangerine.css";
-@import "../styles/control-radius.css";
-
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --radius-xs: var(--radius);
-  --radius-sm: var(--radius);
-  --radius-md: var(--radius);
-  --radius-lg: var(--radius);
-  --radius-xl: var(--radius);
-  --radius-2xl: var(--radius);
-  --radius-3xl: var(--radius);
-  --radius-4xl: var(--radius);
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-3xl: 24px;
+  --radius-4xl: 32px;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -57,7 +51,7 @@
 /* Default theme styles (used when no data-theme-preset is set or when 'default' is selected).
 These serve as the fallback; there is no separate default.css file. */
 :root {
-  --radius: 5px;
+  --radius: 8px;
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
@@ -79,7 +73,7 @@ These serve as the fallback; there is no separate default.css file. */
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.985 0 0);
+  --sidebar: oklch(1 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
@@ -91,7 +85,7 @@ These serve as the fallback; there is no separate default.css file. */
   /* fonts */
   --font-sans: var(--font-geist);
   --font-mono: var(--font-geist-mono);
-  --background: oklch(1 0 0);
+  --background: oklch(0.978 0 0);
   --foreground: oklch(0.145 0 0);
 }
 
@@ -121,7 +115,7 @@ These serve as the fallback; there is no separate default.css file. */
   --chart-5: oklch(0.269 0 0);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary: oklch(0.922 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.269 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
@@ -135,7 +129,7 @@ These serve as the fallback; there is no separate default.css file. */
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground text-sm;
     font-family: var(--font-sans), system-ui, sans-serif;
   }
   html {
@@ -283,4 +277,94 @@ html {
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
+}
+
+/* Workspace surfaces share semantic tokens with standalone settings and auth pages. */
+@layer components {
+  .workspace-page { width: 100%; min-width: 0; padding: 24px; }
+  .workspace-page h1 { font-size: 22px; font-weight: 600; letter-spacing: -.025em; }
+  .workspace-page [data-slot="table-container"] { border-radius: var(--radius-xl); background: var(--card); }
+  .workspace-page [data-slot="table"] { font-size: 13px; }
+  .workspace-page [data-slot="table-row"] { height: 40px; }
+  .task-workspace [data-slot="table"] { font-size: 13px; }
+  .workspace-page [data-slot="table-header"] { background: var(--muted); color: var(--muted-foreground); }
+  .settings-panel { min-width: 0; }
+  .settings-panel h1 { display: none; }
+  .settings-panel > div > div:first-child:has(h1) { position: sticky; top: -24px; z-index: 10; background: var(--popover); padding-block: 12px; }
+  .settings-panel > div { min-width: 0; }
+  .settings-panel [data-slot="card"] { box-shadow: none; }
+
+  .task-composer { border-radius: var(--radius-3xl); background: var(--card); box-shadow: 0 8px 32px -16px oklch(0 0 0 / 15%); }
+  .task-composer [data-slot="input-group-control"] { font-size: 16px; line-height: 1.7; }
+  .task-composer [data-slot="input-group-addon"] { padding: 12px 16px; }
+  .auth-surface { display: flex; min-height: 100dvh; align-items: center; justify-content: center; padding: 24px; }
+  .auth-panel { width: 100%; max-width: 420px; border: 1px solid var(--border); border-radius: var(--radius-2xl); padding: 32px; background: var(--card); }
+  @media (max-width: 767px) { .workspace-page { padding: 16px; } .auth-panel { padding: 24px; } }
+}
+
+/* Findings workspace: shared canvas, outlined controls and individually selectable rows. */
+.findings-workspace {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: calc(100dvh - 96px);
+  gap: 24px;
+  padding: 16px 8px;
+}
+.findings-task-workspace { min-height: calc(100dvh - 220px); }
+.findings-toolbar { display: flex; flex-direction: column; gap: 14px; }
+.findings-heading { font-size: 20px; line-height: 1.4; font-weight: 550; letter-spacing: -.025em; }
+.findings-search-row { display: flex; gap: 8px; margin-top: 10px; }
+[data-findings-control] {
+  border-radius: 12px;
+  border-color: var(--input);
+  background: var(--card);
+  box-shadow: none;
+  font-size: 14px;
+}
+[data-findings-control="search"] { height: 44px; flex: 1; min-width: 0; padding-inline: 4px; }
+[data-findings-control="sort"] { height: 44px; width: 184px; padding-inline: 14px; }
+[data-findings-control="filter"] { height: 40px; gap: 12px; padding-inline: 14px; min-width: 96px; }
+.findings-actions { display: flex; min-height: 36px; align-items: center; gap: 8px; margin-top: 2px; }
+.findings-list-panel { display: flex; flex: 1; min-width: 0; flex-direction: column; min-height: max(320px, calc(100dvh - 370px)); gap: 12px; }
+.findings-task-workspace .findings-list-panel { min-height: max(280px, calc(100dvh - 480px)); }
+.finding-selector { padding: 0; }
+.finding-selector [data-slot="checkbox"] { border-radius: 4px; border-color: var(--muted-foreground); }
+.finding-selector [data-slot="item-group"] { gap: 12px; }
+.finding-list-row {
+  flex-wrap: nowrap;
+  gap: 18px;
+  min-height: 88px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--card);
+  border-color: var(--input);
+}
+.finding-list-row:hover { border-color: var(--ring); }
+.finding-list-row[data-selected="true"] { border-color: var(--foreground); }
+.finding-row-open { display: flex; min-width: 0; width: 100%; flex-direction: column; gap: 5px; text-align: left; border-radius: 4px; cursor: pointer; }
+.finding-row-open:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; }
+.finding-row-title { display: block; max-width: 100%; font-weight: 550; font-size: 14px; }
+.finding-row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+.finding-severity { display: inline-flex; align-items: center; gap: 5px; }
+.finding-severity svg { width: 12px; height: 12px; color: var(--muted-foreground); }
+.finding-severity[data-severity="critical"] svg,
+.finding-severity[data-severity="high"] svg { color: var(--destructive); }
+.finding-severity[data-severity="medium"] svg { color: var(--finding-warning); }
+:root { --finding-warning: oklch(.69 .16 55); }
+.dark { --finding-warning: oklch(.78 .14 65); }
+.finding-row-assets { display: block; max-width: 100%; color: var(--muted-foreground); font-size: 12px; }
+.findings-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px 24px; margin-top: auto; padding-block: 32px 8px; font-size: 13px; }
+.findings-pagination [data-slot="select-trigger"] { height: 36px; border-radius: 8px; background: var(--card); }
+.findings-page-number { display: inline-flex; height: 32px; min-width: 36px; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--muted-foreground); }
+@media (max-width: 640px) {
+  .findings-workspace { padding-inline: 0; gap: 18px; }
+  .findings-search-row { flex-wrap: wrap; }
+  [data-findings-control="search"] { flex-basis: 100%; }
+  [data-findings-control="sort"] { width: 100%; }
+  [data-findings-control="filter"] { min-width: 0; padding-inline: 12px; }
+  .finding-list-row { gap: 10px; padding: 12px; }
+  .finding-row-meta time { flex-basis: 100%; }
+  .findings-pagination { align-items: flex-start; flex-direction: column; }
 }

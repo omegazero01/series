@@ -29,7 +29,7 @@ type Planner struct {
 	window            int                                    // context window in tokens (for compaction)
 	windowFn          func() int                             // optional dynamic task-chain minimum
 	maxTurns          int                                    // max agent turns per run (0 = unlimited)
-	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
+	killWork          IntentStopper                          // stop a queued or running intent (nil = off)
 	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
 	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
 	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
@@ -119,9 +119,8 @@ func (p *Planner) todoFor(expID int64) *actool.TodoStore {
 	return s
 }
 
-// SetKillWork wires the engine's per-work terminate callback so the planner's
-// kill_work tool can stop a single running worker.
-func (p *Planner) SetKillWork(fn func(intentID int64) error) { p.killWork = fn }
+// SetKillWork wires task-scoped termination of queued or running intents.
+func (p *Planner) SetKillWork(fn IntentStopper) { p.killWork = fn }
 
 // SetSteerWork wires the engine's per-work steering callback so the planner's
 // steer_work tool can inject a mid-run course-correction into a running worker.
@@ -293,12 +292,11 @@ func truncOutput(s string, n int) string {
 // lightweight tagged projection is bounded; full persisted detail remains one
 // tool call away (context_get / context_search / …).
 func renderGraphOverview(data map[string]any) string {
-	const plannerOverviewMaxRunes = 24_000
-	return "\n\n【本轮态势（graph_overview 的轻量预取；需要细节再按需调 context_get/context_search 等）】：\n" +
-		renderLightTaggedOrdered("graph_overview", data, []string{
-			"task", "asset_approval_counts", "asset_approval_error", "frontier_open", "findings_total", "facts", "running_intents", "goals", "hints",
-			"open_intents", "recent_done_intents", "recent_facts", "coverage", "related_tasks",
-		}, plannerOverviewMaxRunes)
+	const prefix = "\n\n【本轮态势：有界窗口，未展示不代表不存在；sections 提供遗漏状态和读取入口】：\n<graph_overview>\n"
+	const suffix = "\n</graph_overview>"
+	view := boundedGraphOverview(data, plannerOverviewRunes-len([]rune(prefix+suffix)), 0)
+	body, _ := json.Marshal(view)
+	return prefix + string(body) + suffix
 }
 
 // plannerDefaultTmpl is the built-in EDITABLE body (段 [A]) of the planner prompt,
@@ -350,6 +348,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+	body += "\n方向错误、重复或已无价值的本任务意图，可用 kill_work(intent_id, reason) 终止，适用于等待中或运行中；保留已有产出，成功返回后为 stopped。已暂停意图由用户控制；用户已取消的意图不得重开或创建同方向替代工作。只有工具成功返回 stopped 才能确认终止，错误或超时不能宣称成功。"
 	return body + artifactSpec(workDir)
 }
 
@@ -405,6 +404,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 		return false, "", err
 	}
 	tools = tsx.StripCoverageParams(tools)
+	def.AssetGuidance = plannerAssetGuidance(tools)
 	if err := requireRoleTools("planner", tools); err != nil {
 		return false, "", err
 	}
