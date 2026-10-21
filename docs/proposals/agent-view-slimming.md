@@ -339,6 +339,76 @@ planner_context_search_calls, planner_context_get_calls
 - 不把 `related_tasks` 的正文放进 lean，避免跨任务信息泄漏；
 - 不把 `evidence`/`report` 原文放进 lean，减少敏感内容进入模型上下文的面积。
 
+## 5.9 数值依据与校准
+
+前面的 6k、8 facts、3 findings、10 hints 等不是从某组真实任务测量出来的“最优值”，而是分三类：
+
+### 5.9.1 第一类：代码现状（硬依据）
+
+这些值来自当前实现，不是拍脑袋：
+
+| 数值 | 来源 |
+|---|---|
+| full 24,000 字符 | `agent/overview_projection.go:10` 的 `plannerOverviewRunes` |
+| open intents 最多 30 | `agent/tools.go` 的 `openIntentsCap` |
+| recent done 最多 12 | `graphOverviewData()` 的 `recentDoneCap` |
+| recent facts 最多 20 | `graphOverviewData()` 的 `recentFactsCap` |
+| findings 最多 10 | `ToolLocalNodePage(..., 10)` |
+| hints 最多 50 | `ToolNodesByKind(db.KindHint, 50)` |
+| cold digests 最多 15 | `coldDigestsCap` |
+| goals 最多 100 | `ToolNodesByKind(db.KindGoal, 100)` |
+| context_get 最多 24,000 字符 | `agent/context_tools.go` |
+
+Lean 的数值是在这些现有上限上做减法，不是重新定义系统容量。
+
+### 5.9.2 第二类：设计目标（假设，尚未实测）
+
+| 数值 | 为什么先这么定 | 可信度 |
+|---|---|---|
+| lean 6,000 字符 | full 的 25%；目标是让 Planner 每轮输入明显变短，但仍能放下目标、frontier、最近事实和读取入口。6k 是起始预算，不是测出来的最优值。 | 低，需 A/B |
+| open/running 不截断 | 这是正确性约束，不是省 token 手段。Planner 必须知道所有待办/在跑方向，否则会重复派意图。 | 高，原则性 |
+| recent facts 8 | 大约覆盖最近 2–3 个意图的产出；比 full 的 20 条少，但仍能形成“最近发生了什么”的连续感。 | 中低 |
+| findings 3 | 当前目标相关的最近 3 个漏洞通常足够提醒 Planner；更早的漏洞用 `context_search` 查。 | 中 |
+| recent done 5 | 最近 5 条终态足以看到“刚失败/刚阻塞”的方向；更早的历史对当前决策价值递减。 | 中 |
+| cold digests 3 | 只保留最新 3 条长链路摘要作为“远期记忆入口”；更多摘要按需展开。 | 中 |
+| hints 10 | 这是**最弱的一个值**。当前 Hint 没有 `origin/authority` 分层，10 条可能截掉人类指令。实现前应改成“active hint 全保留”或先做 Hint 分层。 | 低，需修正 |
+| goals 20 | goals 通常远少于 20；这个上限只是防御异常任务，正常不会触发。 | 中高 |
+| 6k 而非 8k | 6k 更接近“只放工作集”的目标；8k 更保守。A/B 应同时测试 6k 和 8k，而不是只测一个。 | 低，需 A/B |
+
+### 5.9.3 第三类：需要真实数据校准的值
+
+这些值不应在实现时写死为“最终答案”，而应通过 M0 埋点和 A/B 调整：
+
+1. **6k vs 8k**：看 Planner 的 `context_search` 次数、总耗时、成功率。
+2. **facts 8 vs 12**：看“较早 fact 导致重复验证”的比例。
+3. **findings 3 vs 5**：看“旧 finding 未被关联”的比例。
+4. **done 5 vs 8**：看重复 intent 率。
+5. **hints 10 vs active 全保留**：看人类指令漏读次数；这项优先级最高。
+6. **cold digests 3 vs 5**：看长链路任务是否频繁展开 digest。
+
+### 5.9.4 校准方法
+
+不要先改默认值，先测：
+
+1. 选 10–20 个代表性任务（简单、多阶段、长链路）。
+2. 在 full 模式下记录：
+   - 每轮 `overview_chars`；
+   - 每个 section 的实际条数；
+   - Planner 的 `context_search` / `context_get` 次数；
+   - 重复 intent、空转轮次、总耗时、总 token。
+3. 计算各 section 条数的 p50 / p90：
+   - 如果 90% 的任务 facts ≤ 8，8 就是合理默认；
+   - 如果 p90 是 15，就把 lean facts 调到 12–15，或接受更多截断但加读取提示。
+4. 用 6k 和 8k 两个预算各跑一组 A/B：
+   - 先看成功率是否非劣；
+   - 再看 token 降幅和耗时；
+   - 最后看重复 intent 和检索次数。
+5. 根据“被截断最多的 section”调整上限，而不是平均分配预算。
+
+### 5.9.5 字符不等于 token
+
+6,000 是**字符数**，不是 token 数。中文、英文、JSON 结构、工具 schema 的 token 比例不同，实际 token 以 provider 返回的 usage 为准。方案里的 6k 只是上下文预算的控制线；A/B 必须看 `input_tokens`，不能只看字符数。
+
 ## 6. 配置与开关
 
 ### 6.1 设置键
