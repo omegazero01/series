@@ -34,6 +34,8 @@
 | `agent/context_tools.go:84` | `context_search` / `context_get` 的可用类型与读取预算 |
 | `agent/coldgraph.go:39` | 冷热图 `R=6`、`K=2` |
 
+需要强调：**full 也不是“全量图”**，而是 24,000 字符的有界窗口，超出部分同样会被截断。Lean 是在这个有界窗口上再收窄，不是把“全量”变成“部分”。
+
 当前 `graphOverviewData()` 的窗口上限：
 
 - goals：最多 100；
@@ -171,16 +173,16 @@ func leanGraphOverviewData(full map[string]any) map[string]any
 
 | 区块 | Lean 保留 | 上限 | 说明 |
 |---|---|---|---|
-| `task` | id、标题、目标、根节点 | 1 | 原样保留 |
+| `task` | description、goal | 1 | 原样保留 |
 | `goals` | id、state、text | 20 | 通常很少，全留 |
 | `frontier_open` | 总数 | 1 | 必留 |
-| `open_intents` | id、summary、state、parents(≤5 ID)、yields_count | 8 | 去重靠 summary |
+| `open_intents` | id、summary、state、asset_ids(≤5)、parents(≤5 ID)、yields_count | 8 | asset_ids 是去重信号，必须保留 |
 | `running_intents` | id、summary、state、最近活动 | 6 | 让 Planner 知道谁在跑 |
 | `recent_done_intents` | id、summary、state、产出 fact ID | 5 | 失败/阻塞复盘用 |
 | `recent_facts` | id、summary、confidence、from_intent | 8 | 最近优先 |
 | `finding_list` | id、summary | 3 | 完整列表按需查 |
-| `hints` | id、text、state | 10 | 先保留现有语义，后续再按 origin 过滤 |
-| `cold_digests` | id、summary、成员数 | 3 | 不展开 body/members |
+| `hints` | id、text、state；traffic_refs 按需读取 | 10 | 先保留现有语义，后续再按 origin 过滤 |
+| `cold_digests` | id、body 首行（截断）、body_is_summary、member_count | 3 | 不展开完整 body/members |
 | `related_tasks` | 只留计数 | 1 | 不注入正文 |
 | `counts` | facts、findings、done_intents、coverage | 全部 | 防止“没展示=不存在” |
 | `sections` | shown、has_more、read、unavailable | 全部 | 读取入口 |
@@ -193,11 +195,17 @@ func leanGraphOverviewData(full map[string]any) map[string]any
 - 删除 `evidence`、`report`、`body`、`raw`、`members` 等长字段；
 - `related_tasks` 不保留嵌套 `recent_facts`，防止跨任务上下文膨胀。
 
+需要区分“本来就没有”和“lean 额外省略”：
+
+- Full 本身已经不带 `evidence` / `report` 原文：`recent_facts` 只有 summary/confidence，`finding_list` 只有 summary/from_intent。
+- Lean 额外省略的是：cold digest 的完整 `body`、related tasks 的嵌套正文、hints 的 `traffic_refs`、以及完整的 `parents`/`yields` 数组。
+- 这些内容仍然可以通过 `context_get` / `context_search` 读取，不是删除。
+
 示例：
 
 ```json
 {
-  "task": {"id": 156, "title": "...", "goal": "..."},
+  "task": {"description": "...", "goal": "..."},
   "goals": [{"id": 1, "state": "open", "text": "..."}],
   "frontier_open": 3,
   "open_intents": [
@@ -205,6 +213,7 @@ func leanGraphOverviewData(full map[string]any) map[string]any
       "id": 42,
       "summary": "对 admin.example.com 的登录接口做默认口令与限速测试",
       "state": "open",
+      "asset_ids": [12, 13],
       "parents": [17, 21],
       "parents_count": 2,
       "yields_count": 4
@@ -221,7 +230,7 @@ func leanGraphOverviewData(full map[string]any) map[string]any
   ],
   "finding_list": [{"id": 12, "summary": "..."}],
   "hints": [{"id": 5, "text": "优先后台", "state": "active"}],
-  "cold_digests": [{"id": 3, "summary": "...", "member_count": 12}],
+  "cold_digests": [{"id": 3, "body": "...", "body_is_summary": true, "member_count": 12}],
   "counts": {"facts": 128, "findings": 7, "done_intents": 41, "coverage": {"pct": 0.42}},
   "sections": {
     "recent_facts": {
@@ -598,7 +607,7 @@ planner_overview_mode=full
 | cold digests | 全部（受预算） | 3 |
 | related tasks | 含正文 | 只留计数 |
 | parents/yields | 完整 | 前 5 ID + 计数 |
-| evidence/report/body | 可能进入 | 不进入 |
+| evidence/report/body | full 也不在 overview；仅 cold digest body 首行 | 不展开 body/related 正文 |
 | 细节读取 | 可选 | 默认按需 |
 
 ## 17. 参考资料
