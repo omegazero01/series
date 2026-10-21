@@ -1,9 +1,6 @@
 "use client";
 
-import { useSettingsDirty, useSettingsDraft } from "@/components/settings/settings-context";
-
 import * as React from "react";
-import { HTTPAuthCard } from "./http-auth-card";
 
 import {
   CheckCircle2Icon,
@@ -19,6 +16,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useSettingsDirty, useSettingsDraft } from "@/components/settings/settings-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -30,6 +28,7 @@ import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
 import type { GlobalProxyProbeResult, Settings } from "@/lib/types";
 
+import { HTTPAuthCard } from "./http-auth-card";
 
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
@@ -70,6 +69,8 @@ export default function SystemSettingsPage() {
   const [injectWorker, setInjectWorker] = React.useState(true);
   // 实验功能:noa 上下文压缩(默认关)。
   const [noaCompaction, setNoaCompaction] = React.useState(false);
+  // 实验功能:Planner 态势窗口(默认 full)。
+  const [plannerOverviewMode, setPlannerOverviewMode] = React.useState<"full" | "lean">("full");
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
 
@@ -101,6 +102,7 @@ export default function SystemSettingsPage() {
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
+    setPlannerOverviewMode(s.planner_overview_mode === "lean" ? "lean" : "full");
   }, []);
 
   const saveWorkers = () => {
@@ -239,6 +241,21 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => {
         setNoaCompaction(!v); // revert on failure
+        toast.error(`保存失败：${(e as Error).message}`);
+      });
+  };
+
+  const savePlannerOverviewMode = (v: "full" | "lean") => {
+    const prev = plannerOverviewMode;
+    setPlannerOverviewMode(v); // optimistic
+    api
+      .setSettings({ planner_overview_mode: v })
+      .then((s) => {
+        apply(s);
+        toast.success(v === "lean" ? "已开启精简态势窗口（下一轮 Planner 生效）" : "已恢复完整态势窗口");
+      })
+      .catch((e) => {
+        setPlannerOverviewMode(prev); // revert on failure
         toast.error(`保存失败：${(e as Error).message}`);
       });
   };
@@ -756,6 +773,38 @@ export default function SystemSettingsPage() {
               disabled={!loaded}
               onCheckedChange={toggleNoaCompaction}
             />
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FlaskConicalIcon className="size-4" />
+              Planner 态势窗口
+            </CardTitle>
+            <CardDescription>
+              控制 Planner 每轮预注入的探索图摘要，默认<b>完整</b>。<b>精简</b>
+              只注入目标、当前待办/运行方向、最近事实和读取入口，细节由 Planner 按需检索。 探索图、权限、审计和 UI
+              回放不受影响；切换在下一轮规划生效，无需重建 Agent。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <Label htmlFor="planner-overview-mode" className="text-sm font-normal text-muted-foreground">
+              当前：{plannerOverviewMode === "lean" ? "精简（实验）" : "完整"}
+            </Label>
+            <Select
+              value={plannerOverviewMode}
+              onValueChange={(v) => savePlannerOverviewMode(v as "full" | "lean")}
+              disabled={!loaded}
+            >
+              <SelectTrigger id="planner-overview-mode" className="w-56">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="full">完整（当前默认）</SelectItem>
+                <SelectItem value="lean">精简（实验）</SelectItem>
+              </SelectContent>
+            </Select>
           </CardContent>
         </Card>
 

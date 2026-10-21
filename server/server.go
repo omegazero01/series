@@ -458,6 +458,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetNonStreaming(nonStreamingResolver(pCfg))    // 该 profile 选非流式时走 Provider.Complete
 	pl.SetMaxTokens(maxTokensResolver(pCfg))          // 单次回复输出上限(0 = 不发)
 	pl.SetNoaEnabled(s.m.NoaCompactionEnabled)        // 实验功能:noa 上下文压缩(每 run 读)
+	pl.SetOverviewProfile(s.plannerOverviewProfile)   // 实验功能:Planner 态势窗口 full/lean(每轮读)
 	// cold-digest §7: background cold-node compaction, on the planner's provider/
 	// model (§4 uses the running agent's model). Uses Complete (non-streaming) for
 	// the one-shot body summarization.
@@ -479,6 +480,15 @@ func nonStreamingResolver(cfg agent.Config) func() bool {
 func maxTokensResolver(cfg agent.Config) func() int {
 	maxTokens := cfg.MaxTokens
 	return func() int { return maxTokens }
+}
+
+// plannerOverviewProfile converts the persisted experimental setting into the
+// planner's projection enum. Read per planning round.
+func (s *Server) plannerOverviewProfile() agent.OverviewProfile {
+	if s.m.PlannerOverviewMode() == "lean" {
+		return agent.OverviewLean
+	}
+	return agent.OverviewFull
 }
 
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
@@ -3519,6 +3529,9 @@ func (s *Server) settingsPayload() map[string]any {
 		// 实验功能:noa 模型驱动上下文压缩(默认关)。开启后平台接入的四类 agent 由 noa
 		// 接管上下文压缩,取代内置 compaction;每 run 读一次,对之后启动的 run 生效。
 		"noa_compaction": s.m.NoaCompactionEnabled(),
+		// 实验功能:Planner 态势窗口 full/lean(默认 full)。仅影响 Planner 每轮预注入
+		// 的 graph_overview 投影;图/权限/审计/UI 不变。
+		"planner_overview_mode": s.m.PlannerOverviewMode(),
 	}
 }
 
@@ -3573,6 +3586,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		ConstraintsInjectWorker  *bool `json:"constraints_inject_worker"`
 		// 实验功能:noa 上下文压缩开关(默认关);每 run 读,对之后启动的 run 生效,无需重建 agent。
 		NoaCompaction *bool `json:"noa_compaction"`
+		// 实验功能:Planner 态势窗口 full/lean(默认 full);每轮读,无需重建 agent。
+		PlannerOverviewMode *string `json:"planner_overview_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3602,6 +3617,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// 每 run 读的解析器,切换即时对之后启动的 run 生效,无需 applyLLM 重建。
 		if err := s.m.SetNoaCompaction(*req.NoaCompaction); err != nil {
 			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.PlannerOverviewMode != nil {
+		// Planner 每轮读取该设置,切换在下一轮规划生效,无需 applyLLM 重建。
+		if err := s.m.SetPlannerOverviewMode(*req.PlannerOverviewMode); err != nil {
+			writeErr(w, 400, err.Error())
 			return
 		}
 	}

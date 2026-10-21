@@ -1019,6 +1019,9 @@ export interface Settings {
   // worker/主 agent/对话)由 noa 接管上下文压缩,取代内置 compaction;每 run 读一次,对
   // 之后启动的 run 生效。
   noa_compaction?: boolean;
+  // 实验功能:Planner 每轮预注入的态势窗口(默认 full)。lean 只注入目标、frontier、
+  // 最近事实和读取入口,细节由 Planner 按需检索。
+  planner_overview_mode?: "full" | "lean";
 }
 
 export interface SmartProxyHost {

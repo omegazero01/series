@@ -329,6 +329,9 @@ const (
 	// agent(planner/worker/主 agent/对话)由 noa 接管上下文压缩,取代内置 compaction。
 	// 每 run 读一次,切换只影响之后启动的 run。
 	settingNoaCompaction = "noa_compaction"
+	// 实验功能:Planner 每轮预注入的态势窗口。full=当前完整窗口;lean=只注入目标、
+	// frontier、最近事实和读取入口。图/权限/审计不变;每轮读取,切换即时生效。
+	settingPlannerOverviewMode = "planner_overview_mode"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
 	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
@@ -714,6 +717,36 @@ func (m *Manager) NoaCompactionEnabled() bool {
 // the resolver reads it per run, so no rebuild is needed.
 func (m *Manager) SetNoaCompaction(on bool) error {
 	return m.pg.SetBool(settingNoaCompaction, on)
+}
+
+// PlannerOverviewMode returns "full" or "lean" for the planner's per-round
+// situation projection. Default is full. SERIES_PLANNER_OVERVIEW lets an
+// isolated test instance force a mode without touching its database.
+func (m *Manager) PlannerOverviewMode() string {
+	if v := strings.TrimSpace(os.Getenv("SERIES_PLANNER_OVERVIEW")); v != "" {
+		if strings.EqualFold(v, "lean") {
+			return "lean"
+		}
+		return "full"
+	}
+	v, ok, err := m.pg.GetSetting(settingPlannerOverviewMode)
+	if err != nil || !ok {
+		return "full"
+	}
+	if strings.EqualFold(strings.TrimSpace(v), "lean") {
+		return "lean"
+	}
+	return "full"
+}
+
+// SetPlannerOverviewMode persists the experimental planner projection mode.
+// The planner reads it per round, so no agent rebuild is needed.
+func (m *Manager) SetPlannerOverviewMode(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != "full" && mode != "lean" {
+		return fmt.Errorf("planner_overview_mode 必须是 full 或 lean")
+	}
+	return m.pg.SetSetting(settingPlannerOverviewMode, mode)
 }
 
 // LLMPoolEnabled reports whether LLM failover ("轮询") is on (默认关；

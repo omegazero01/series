@@ -1,6 +1,6 @@
 # 规划者态势窗口瘦身方案（Agent View Slimming）
 
-- 状态：提案（仅文档，未改代码）
+- 状态：已实现（实验，默认 full；lean 需在设置中开启）
 - 分支：`proposal/agent-view-slimming`
 - 基线：`main@0f47873`
 - 日期：2026-10-21
@@ -8,7 +8,7 @@
 
 ## 1. 摘要
 
-把 Planner 每轮预注入的 `graph_overview` 从当前的 **full（上限 24,000 字符）** 改成 **lean（目标 6,000 字符左右）**：
+把 Planner 每轮预注入的 `graph_overview` 从当前的 **full（上限 24,000 字符）** 改成 **lean（首版 10,000 字符）**：
 
 - 图仍然是唯一事实源，继续承担 fact/intent/hint/digest、资产锚点、权限过滤、血缘、审计和 UI 回放；
 - Planner 默认只拿目标、frontier、最近少量 fact、active hint 和关键计数；
@@ -76,7 +76,7 @@
 
 ### 3.1 目标
 
-1. Planner 每轮预注入的态势字符数降到 full 的 **40% 以下**（目标 4k–8k，默认 6k）。
+1. Planner 每轮预注入的态势字符数降到 full 的 **55% 以下**（首版 10,000；后续目标 6k–8k，视 A/B 和投影元数据优化而定）。
 2. 成功率不下降（非劣于 full，允许 5% 以内波动）。
 3. Planner 仍能完成：目标判定、frontier 去重、串行链规划、失败复盘、证据引用。
 4. 所有省略内容都有明确的 `sections` 读取入口，且读取受当前任务权限约束。
@@ -187,7 +187,7 @@ func leanGraphOverviewData(full map[string]any) map[string]any
 | `counts` | facts、findings、done_intents、coverage | 全部 | 防止“没展示=不存在” |
 | `sections` | shown、has_more、read、unavailable | 全部 | 读取入口 |
 
-**frontier 永不截断。** `open_intents` / `running_intents` 是 Planner 去重的依据，行数不能省；lean 只压缩它们的字段和摘要。如果 6k 预算仍不够，优先缩短 `summary`、去掉 `parents/yields`，不能把第 9 条 open intent 藏掉。
+**frontier 永不截断。** `open_intents` / `running_intents` 是 Planner 去重的依据，行数不能省；lean 只压缩它们的字段和摘要。如果 lean 预算仍不够，优先缩短 `summary`、去掉 `parents/yields`，不能把后面的 open intent 藏掉。
 
 字段裁剪：
 
@@ -256,7 +256,7 @@ func leanGraphOverviewData(full map[string]any) map[string]any
 ```go
 const (
     plannerOverviewRunes     = 24000 // full，保持现状
-    plannerLeanOverviewRunes = 6000  // lean，目标值
+    plannerLeanOverviewRunes = 10000 // lean，首版预算（6k 会饿死 frontier）
 )
 ```
 
@@ -341,7 +341,7 @@ planner_context_search_calls, planner_context_get_calls
 
 ## 5.9 数值依据与校准
 
-前面的 6k、8 facts、3 findings、10 hints 等不是从某组真实任务测量出来的“最优值”，而是分三类：
+前面的 10k、8 facts、3 findings、10 hints 等不是从某组真实任务测量出来的“最优值”，而是分三类：
 
 ### 5.9.1 第一类：代码现状（硬依据）
 
@@ -365,21 +365,21 @@ Lean 的数值是在这些现有上限上做减法，不是重新定义系统容
 
 | 数值 | 为什么先这么定 | 可信度 |
 |---|---|---|
-| lean 6,000 字符 | full 的 25%；目标是让 Planner 每轮输入明显变短，但仍能放下目标、frontier、最近事实和读取入口。6k 是起始预算，不是测出来的最优值。 | 低，需 A/B |
+| lean 10,000 字符 | full 的 42%；首版采用 10k。合成场景（8 条 open intent）实测：6k 预算只装下 2 条 frontier，10k 才装下全部 8 条。6k 是后续优化目标，不是当前默认。 | 中低，需 A/B |
 | open/running 不截断 | 这是正确性约束，不是省 token 手段。Planner 必须知道所有待办/在跑方向，否则会重复派意图。 | 高，原则性 |
 | recent facts 8 | 大约覆盖最近 2–3 个意图的产出；比 full 的 20 条少，但仍能形成“最近发生了什么”的连续感。 | 中低 |
 | findings 3 | 当前目标相关的最近 3 个漏洞通常足够提醒 Planner；更早的漏洞用 `context_search` 查。 | 中 |
 | recent done 5 | 最近 5 条终态足以看到“刚失败/刚阻塞”的方向；更早的历史对当前决策价值递减。 | 中 |
-| cold digests 3 | 只保留最新 3 条长链路摘要作为“远期记忆入口”；更多摘要按需展开。 | 中 |
+| cold digests 3 | 只保留最新 3 条长链路摘要作为“远期记忆入口”；更多按需展开。 | 中 |
 | hints 10 | 这是**最弱的一个值**。当前 Hint 没有 `origin/authority` 分层，10 条可能截掉人类指令。实现前应改成“active hint 全保留”或先做 Hint 分层。 | 低，需修正 |
 | goals 20 | goals 通常远少于 20；这个上限只是防御异常任务，正常不会触发。 | 中高 |
-| 6k 而非 8k | 6k 更接近“只放工作集”的目标；8k 更保守。A/B 应同时测试 6k 和 8k，而不是只测一个。 | 低，需 A/B |
+| 先 10k，后 6k–8k | 首版优先保证 frontier 完整和成功率；等投影元数据瘦身、A/B 有数据后，再压到 6k–8k。 | 中 |
 
 ### 5.9.3 第三类：需要真实数据校准的值
 
 这些值不应在实现时写死为“最终答案”，而应通过 M0 埋点和 A/B 调整：
 
-1. **6k vs 8k**：看 Planner 的 `context_search` 次数、总耗时、成功率。
+1. **10k 首版 vs 6k/8k 优化**：看 Planner 的 `context_search` 次数、总耗时、成功率。
 2. **facts 8 vs 12**：看“较早 fact 导致重复验证”的比例。
 3. **findings 3 vs 5**：看“旧 finding 未被关联”的比例。
 4. **done 5 vs 8**：看重复 intent 率。
@@ -399,7 +399,7 @@ Lean 的数值是在这些现有上限上做减法，不是重新定义系统容
 3. 计算各 section 条数的 p50 / p90：
    - 如果 90% 的任务 facts ≤ 8，8 就是合理默认；
    - 如果 p90 是 15，就把 lean facts 调到 12–15，或接受更多截断但加读取提示。
-4. 用 6k 和 8k 两个预算各跑一组 A/B：
+4. 首版先用 10k 跑基线；再尝试 6k/8k，看是否能通过投影元数据瘦身保住 frontier。
    - 先看成功率是否非劣；
    - 再看 token 降幅和耗时；
    - 最后看重复 intent 和检索次数。
@@ -407,7 +407,7 @@ Lean 的数值是在这些现有上限上做减法，不是重新定义系统容
 
 ### 5.9.5 字符不等于 token
 
-6,000 是**字符数**，不是 token 数。中文、英文、JSON 结构、工具 schema 的 token 比例不同，实际 token 以 provider 返回的 usage 为准。方案里的 6k 只是上下文预算的控制线；A/B 必须看 `input_tokens`，不能只看字符数。
+10,000 是**字符数**，不是 token 数。中文、英文、JSON 结构、工具 schema 的 token 比例不同，实际 token 以 provider 返回的 usage 为准。方案里的 10k 只是上下文预算的控制线；A/B 必须看 `input_tokens`，不能只看字符数。
 
 ## 6. 配置与开关
 
@@ -500,7 +500,7 @@ Planner.Plan()
   ├─ renderGraphOverview(data, profile)
   │    ├─ full: boundedGraphOverview(data, 24000)
   │    └─ lean: leanGraphOverviewData(data)
-  │              └─ boundedGraphOverview(lean, 6000)
+  │              └─ boundedGraphOverview(lean, 10000)
   ├─ situational = cancelled + triggers + overview
   ├─ input = lead + situational + ...
   └─ LLM
@@ -521,7 +521,7 @@ Planner.Plan()
 3. `TestLeanOverviewKeepsUnavailable`
    - 某个 section 查询失败时，保留 `unavailable`，不变成空数组。
 4. `TestLeanOverviewBudget`
-   - 构造超大字段，断言输出 ≤ 6000 字符。
+   - 构造超大字段，断言输出 ≤ 10,000 字符。
 5. `TestLeanOverviewScope`
    - 断言 `sections.read.args.task_id` 是当前任务，不出现其他任务 ID。
 6. `TestLeanOverviewOmitsLongFields`
@@ -536,7 +536,7 @@ Planner.Plan()
 ### 9.2 集成测试
 
 - 用 fake provider 捕获 Planner 的实际 user input；
-- 断言 lean 模式下 `overview_chars <= 6000`；
+- 断言 lean 模式下 `overview_chars <= 10000`；
 - 断言 `goals`、`frontier_open`、`counts` 存在；
 - 断言 full 模式仍为 24k 上限；
 - 断言 `context_search` / `context_get` 工具仍可调用，权限 scope 正确。
@@ -633,7 +633,7 @@ planner_overview_mode=full
 
 ## 13. 验收标准
 
-- [ ] Lean 模式 Planner 预注入 ≤ 6,000 字符（p95）。
+- [ ] Lean 模式 Planner 预注入 ≤ 10,000 字符（p95；后续目标 6k–8k）。
 - [ ] Full 模式输出与改造前一致（无回归）。
 - [ ] 成功率非劣于 full（≥95%）。
 - [ ] Planner 输入 token 降低 ≥30%。
@@ -658,7 +658,7 @@ planner_overview_mode=full
 
 ## 15. 开放问题
 
-1. Lean 默认预算定 6,000 还是 8,000？建议先用 6,000，跑 3 个任务看 Planner 的检索次数。
+1. Lean 首版预算定 10,000；6k/8k 是否能通过投影元数据瘦身保住 frontier，需要后续验证。
 2. `graph_overview` 工具是否对 Planner 默认返回 lean？建议第二阶段做，避免第一版改工具语义。
 3. Hint 的 `origin/authority` 是否在本方案先留字段？建议只留 `hints` 上限，语义改造放到独立提案。
 4. 是否需要在 UI 显示“本轮态势字符数/省略条数”？建议先日志，稳定后再上 UI。
@@ -668,7 +668,7 @@ planner_overview_mode=full
 
 | 项目 | Full | Lean |
 |---|---|---|
-| 预算 | 24,000 字符 | 6,000 字符 |
+| 预算 | 24,000 字符 | 10,000 字符 |
 | goals | 最多 100 | 最多 20 |
 | open intents | 最多 30 | 全部（字段压缩，不截断） |
 | running intents | 全部 | 全部 |

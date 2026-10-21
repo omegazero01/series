@@ -50,7 +50,7 @@ func TestOverviewProjectionFairSections(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("source mutated")
 	}
-	prompt := renderGraphOverview(data)
+	prompt := renderGraphOverview(data, OverviewFull)
 	if utf8.RuneCountInString(prompt) > 24000 {
 		t.Fatal("prompt wrappers exceed budget")
 	}
