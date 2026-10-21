@@ -39,6 +39,7 @@ type Planner struct {
 	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	overviewProfileFn func() OverviewProfile                 // resolver: full/lean situation projection (nil = full)
 	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
@@ -61,6 +62,18 @@ func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
 // planner wake-up to advance the round counter, maintain cold stamps, and
 // (off the hot path) fold cold nodes into digests. nil = feature disabled.
 func (p *Planner) SetCompactor(c *Compactor) { p.compactor = c }
+
+// SetOverviewProfile wires the full/lean projection resolver. It is read once
+// per planning round, so a settings change takes effect on the next wake-up
+// without rebuilding the planner. nil/unset = full (current behavior).
+func (p *Planner) SetOverviewProfile(fn func() OverviewProfile) { p.overviewProfileFn = fn }
+
+func (p *Planner) overviewProfile() OverviewProfile {
+	if p.overviewProfileFn != nil && p.overviewProfileFn() == OverviewLean {
+		return OverviewLean
+	}
+	return OverviewFull
+}
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
 // model path (true = non-streaming). nil/unset = streaming (default).
@@ -291,13 +304,31 @@ func truncOutput(s string, n int) string {
 // hand, saving the round-trip it would otherwise spend fetching an overview. The
 // lightweight tagged projection is bounded; full persisted detail remains one
 // tool call away (context_get / context_search / …).
-func renderGraphOverview(data map[string]any) string {
+//
+// OverviewLean is a narrower agent-facing projection: the graph itself is
+// unchanged, but the planner receives only the goal, frontier, recent facts,
+// active hints and section read pointers. Full remains the default.
+func renderGraphOverview(data map[string]any, profile OverviewProfile) string {
 	const prefix = "\n\n【本轮态势：有界窗口，未展示不代表不存在；sections 提供遗漏状态和读取入口】：\n<graph_overview>\n"
 	const suffix = "\n</graph_overview>"
-	view := boundedGraphOverview(data, plannerOverviewRunes-len([]rune(prefix+suffix)), 0)
+	source := data
+	budget := plannerOverviewRunes
+	if profile == OverviewLean {
+		source = leanGraphOverviewData(data)
+		budget = plannerLeanOverviewRunes
+	}
+	view := boundedGraphOverview(source, budget-len([]rune(prefix+suffix)), 0)
+	// If the lean projection cannot even fit its metadata, fall back to the
+	// full window for this round rather than handing the planner an empty
+	// situation. The next round retries lean.
+	if profile == OverviewLean && view["context_unavailable"] == true {
+		view = boundedGraphOverview(data, plannerOverviewRunes-len([]rune(prefix+suffix)), 0)
+	}
 	body, _ := json.Marshal(view)
 	return prefix + string(body) + suffix
 }
+
+const leanOverviewGuidance = "\n\n【本轮态势模式：lean】\n本轮只预注入目标、frontier、最近事实、active hints 和计数。未展示的 facts/findings/历史意图不代表不存在。信息不足时先用 context_search / context_get 查询，再判断目标或派意图；不要凭概览摘要猜测完整证据。"
 
 // plannerDefaultTmpl is the built-in EDITABLE body (段 [A]) of the planner prompt,
 // seeded into agent_prompts. Goal is a {{.Goal}} template var; the 中间产物输出规约
@@ -315,7 +346,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 1. **有界态势已附在本提示下方**（就是 graph_overview 的返回，无需再调它）：task（原始标题+目标/根节点）、资产计数、goals+状态、open/running/recent_done 意图、sites_without_endpoints（无端点的站点，提示可能待探的方向）、facts（探索事实数，与漏洞是两类）、recent_facts（{id,summary,confidence?}）。
    - **范围**：仅使用本任务及直接关联任务的授权可见内容；继承记录带 source_task_id/inherited 且只读。列表和计数可能受窗口限制，以返回的截断/计数说明为准，不能把概览当作全量。
-   - **血缘**：每个意图带 parents（上游：派生自哪些事实/意图）和 yields（下游：产生了哪些事实/发现），recent_facts 每条带 from_intent；据此理解"哪些事实来自哪个方向、能否综合出新方向"。
+   - **血缘**：每个意图可能带 parents（上游：派生自哪些事实/意图）和 yields（下游：产生了哪些事实/发现），recent_facts 每条带 from_intent；据此理解"哪些事实来自哪个方向、能否综合出新方向"。若窗口只给了 parents 的前几个 ID 或 yields 的数量，需要完整链路时用 context_get 的 parents 视图读取，不要因为字段少就假设没有上游。
    - **否定/存疑观察**（recent_facts 里"端口关闭/不可注入"等）是 worker 的观察、不是定论：采信前用 context_get 读取 node:ID 的 /evidence——evidence 扎实、confidence=observed 且手段已穷尽的才视为该方向暂时封住；evidence 缺失、只是"看起来像/只探一次"、或 confidence=inferred 的，按【尚未探明】处理，若在范围内且无其它意图覆盖，默认派一条复核意图去证实或推翻（**同一否定方向至多复核一次**；复核后仍为否定、且证据合理，就尊重该结论、不再派）。
    - **要更深细节才按需调**：context_search（摘要和正文检索，默认10条，用next_cursor续页）、context_get（用node:ID/activity:ID引用读取正文）、asset_search（DSL检索）和asset_get（按ID读取）。不要默认拉全量。
 
@@ -437,7 +468,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 			cancelled += fmt.Sprintf("此前用户取消原因：%s；不要创建同方向替代工作。", p.Reason)
 		}
 	}
-	situational := cancelled + renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData())
+	profile := p.overviewProfile()
+	situational := cancelled + renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData(), profile)
+	if profile == OverviewLean {
+		situational += leanOverviewGuidance
+	}
 	// 任务级 deadline / 终局模式(经 ctx 注入,见 taskclock.go)。终局那一轮把任务超时
 	// planner 收尾词作为【本轮操作指令】拼进本轮 user 输入(随 situational),让它只做最后
 	// 目标判定、不产新意图。
