@@ -176,8 +176,8 @@ func leanGraphOverviewData(full map[string]any) map[string]any
 | `task` | description、goal | 1 | 原样保留 |
 | `goals` | id、state、text | 20 | 通常很少，全留 |
 | `frontier_open` | 总数 | 1 | 必留 |
-| `open_intents` | id、summary、state、asset_ids(≤5)、parents(≤5 ID)、yields_count | 8 | asset_ids 是去重信号，必须保留 |
-| `running_intents` | id、summary、state、最近活动 | 6 | 让 Planner 知道谁在跑 |
+| `open_intents` | 全部 open（当前上限 30）：id、summary、state、asset_ids、parents(≤5)、yields_count | 不截断 | frontier 是去重依据；预算不足时压缩 summary，不丢行 |
+| `running_intents` | 全部 running：id、summary、state | 不截断 | 通常 ≤ worker 数 |
 | `recent_done_intents` | id、summary、state、产出 fact ID | 5 | 失败/阻塞复盘用 |
 | `recent_facts` | id、summary、confidence、from_intent | 8 | 最近优先 |
 | `finding_list` | id、summary | 3 | 完整列表按需查 |
@@ -186,6 +186,8 @@ func leanGraphOverviewData(full map[string]any) map[string]any
 | `related_tasks` | 只留计数 | 1 | 不注入正文 |
 | `counts` | facts、findings、done_intents、coverage | 全部 | 防止“没展示=不存在” |
 | `sections` | shown、has_more、read、unavailable | 全部 | 读取入口 |
+
+**frontier 永不截断。** `open_intents` / `running_intents` 是 Planner 去重的依据，行数不能省；lean 只压缩它们的字段和摘要。如果 6k 预算仍不够，优先缩短 `summary`、去掉 `parents/yields`，不能把第 9 条 open intent 藏掉。
 
 字段裁剪：
 
@@ -598,8 +600,8 @@ planner_overview_mode=full
 |---|---|---|
 | 预算 | 24,000 字符 | 6,000 字符 |
 | goals | 最多 100 | 最多 20 |
-| open intents | 最多 30 | 8 |
-| running intents | 全部 | 6 |
+| open intents | 最多 30 | 全部（字段压缩，不截断） |
+| running intents | 全部 | 全部 |
 | recent done | 12 | 5 |
 | recent facts | 20 | 8 |
 | findings | 10 | 3 |
