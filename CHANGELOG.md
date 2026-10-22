@@ -9,6 +9,7 @@
 #### 新增的功能
 
 - **Agent 发起的 curl/wget 默认携带浏览器 User-Agent**：此前 LLM 调用 curl 测试目标时 UA 是 `curl/x.x`，容易被最简单的指纹规则识别。现在 `<数据目录>/tool-http/` 下自动生成 `.curlrc` 与 `wgetrc`（默认为固定的桌面 Chrome UA），并通过 `CURL_HOME`/`WGETRC` 注入所有 Agent 的 Bash 会话——与是否开启流量捕获无关；模型显式传 `-A/--user-agent` 时仍以命令行为准。配置文件已存在则不覆盖，可手工修改自定义 UA；交互式 shell 会话同样生效。Python requests 等其它客户端不在本次范围。
+- **Planner 态势窗口新增精简模式（实验，默认关闭）**：设置页「实验功能」新增「Planner 态势窗口」，可选完整（默认）或精简。精简模式只向 Planner 预注入目标、完整 frontier、最近 8 条事实、3 条漏洞摘要、10 条提示和读取入口，预算约 10k 字符；完整血缘、较早事实/意图/漏洞和冷摘要正文仍可通过 `context_search` / `context_get` 按需读取。探索图、资产锚点、权限、审计与 UI 回放不变；切换在下一轮规划生效，无需重建 Agent。
 
 ### 任务
 

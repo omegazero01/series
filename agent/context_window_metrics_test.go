@@ -100,7 +100,7 @@ func TestContextWindowRetrievalMetrics(t *testing.T) {
 		data := ts.graphOverviewData()
 		old := renderLightTaggedOrdered("graph_overview", data, []string{"task", "goals", "open_intents"}, 24000)
 		start := time.Now()
-		rendered := renderGraphOverview(data)
+		rendered := renderGraphOverview(data, OverviewFull)
 		t.Logf("nodes=%d overview_before_bytes=%d overview_after_bytes=%d before_chars=%d after_chars=%d new_projection_elapsed=%s", nodes, len(old), len(rendered), utf8.RuneCountInString(old), utf8.RuneCountInString(rendered), time.Since(start))
 	}
 }
