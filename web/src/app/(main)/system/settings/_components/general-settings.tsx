@@ -88,7 +88,7 @@ const PLANNER_LIMIT_FIELDS: Array<{
   {
     key: "findings",
     label: "漏洞记录（发现）条数",
-    description: "对应 finding_list，只显示已确认漏洞；不是 fact 事实。",
+    description: "对应 finding_list（漏洞/发现记录），不是 fact（事实）；包含已确认或已驳回的漏洞记录。",
     min: 1,
     max: 10,
     step: 1,
