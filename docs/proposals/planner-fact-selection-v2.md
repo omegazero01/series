@@ -75,7 +75,6 @@ graphOverviewData()
 - 不追求 `context_search` 总量下降；
 - 不做全库语义检索；
 - 不解决 finding / intent / detail 的搜索需求；
-- 不做一跳关系；
 - 不改数据库 schema、权限、审计；
 - 不新增 UI 开关；
 - 不重写完整模式。
@@ -87,12 +86,12 @@ graphOverviewData()
 只做这些：
 
 1. 仅 lean 模式；
-2. base 最近事实 + frontier/trigger 的直接 `yields` 事实；
+2. base 最近事实 + frontier/trigger 的直接 `yields` 事实 + `derived_from` 一跳事实；
 3. trigger 只认 `done` / `finding`，排除 `cancelled`；
-4. 简单排序：trigger > frontier > recent；
+4. 多因素排序：来源基础分 + 新旧 + 证据强度 + 意图重要度；
 5. 每意图最多 2 条，防止一个方向占满；
 6. 最终条数由 `recent_facts` 控制；
-7. 环境开关默认关闭；
+7. 环境开关默认开启，可用 `off` 关闭；
 8. 失败保留 base 最近事实。
 
 明确不做：
@@ -101,10 +100,8 @@ graphOverviewData()
 - `explore` 分组；
 - `why` 字段；
 - 多 trigger 独立配额；
-- 一跳关系；
-- 动态候选公式；
 - 完整模式改动；
-- 新 UI。
+- 新 UI 开关。
 
 ---
 
@@ -139,6 +136,12 @@ type FactYield struct {
 }
 
 func (s *ExplorationStore) FactsYieldedByIntents(
+    ctx context.Context,
+    intentIDs []int64,
+    limit int,
+) ([]FactYield, error)
+
+func (s *ExplorationStore) FactsDerivedFromIntents(
     ctx context.Context,
     intentIDs []int64,
     limit int,
@@ -247,19 +250,30 @@ func (s *ExplorationStore) ToolVisibleNodesByIDs(
 
 ### 7.1 分数
 
-只保留三个层级：
+基础分按来源关系分档：
 
-| 条件 | 分数 |
+| 条件 | 基础分 |
 |---|---:|
-| 任一来源意图是 trigger | 2 |
-| 任一来源意图是 frontier | 1 |
-| 其他（仅最近事实） | 0 |
+| 本轮 trigger 意图直接 `yields` 的事实 | 100 |
+| 本轮 trigger 意图的 `derived_from` 一跳事实 | 80 |
+| frontier 意图直接 `yields` 的事实 | 40 |
+| frontier 意图的 `derived_from` 一跳事实 | 15 |
+| 其他事实 | 0 |
+
+再叠加三个有界信号：
+
+| 信号 | 加分 |
+|---|---:|
+| 新旧程度（按节点 ID 估算创建顺序） | 0–5 |
+| `confidence=observed`（实际观察到的证据） | +3 |
+| 来源意图重要度（intent priority 1–10 折半） | 0–5 |
 
 同分时：
 
 1. `confidence=observed` 优先于 `inferred`；
-2. 较新的优先；
-3. 按 fact ID 稳定排序。
+2. 按原顺序（fact ID）稳定排序。
+
+基础分和加成相加，因此相邻档位不会被小幅信号轻易跨过：最高一跳 trigger 为 `80+5+3+5=93`，仍低于最低直接 trigger `100`。
 
 ### 7.2 选择
 
@@ -401,9 +415,8 @@ cd web && npx tsc --noEmit
 
 ## 12. 已知限制
 
-- 只召回直接 `yields` 关系，不是全库检索；
+- 只召回直接 `yields` 和 `derived_from` 一跳关系，不是全库检索；
 - `openIntentsCap=30` 的源上限仍在；
-- 不做一跳关系；
 - 不做 finding/intent 选择；
 - 不解决关键词搜索和 detail 读取；
 - 权重没有真实数据校准，必须先 A/B。

@@ -239,8 +239,8 @@ func TestLeanFactSelectionRanksTriggerThenFrontier(t *testing.T) {
 	if len(facts) != 3 {
 		t.Fatalf("facts=%d want 3", len(facts))
 	}
-	if facts[0]["id"] != int64(3) || facts[1]["id"] != int64(5) || facts[2]["id"] != int64(2) {
-		t.Fatalf("order=%v want [3 5 2]", []any{facts[0]["id"], facts[1]["id"], facts[2]["id"]})
+	if facts[0]["id"] != int64(5) || facts[1]["id"] != int64(3) || facts[2]["id"] != int64(4) {
+		t.Fatalf("order=%v want [5 3 4]", []any{facts[0]["id"], facts[1]["id"], facts[2]["id"]})
 	}
 	if _, leaked := facts[0]["_sources"]; leaked {
 		t.Fatal("_sources leaked into lean output")
@@ -291,6 +291,76 @@ func TestLeanFactRowsPreservesLegacyOrderWithoutFocus(t *testing.T) {
 	if len(facts) != 2 || facts[0]["id"] != int64(1) || facts[1]["id"] != int64(2) {
 		t.Fatalf("legacy order=%v", []any{facts[0]["id"], facts[1]["id"]})
 	}
+}
+
+func TestLeanFactSelectionRanksOneHopRelations(t *testing.T) {
+	full := leanFixtureFull()
+	full["open_intents"] = []map[string]any{
+		{"id": int64(10), "summary": "frontier 10", "state": "open"},
+	}
+	full["running_intents"] = []map[string]any{}
+	full["recent_facts"] = []map[string]any{
+		{"id": int64(1), "summary": "direct trigger", "from_intent": int64(20)},
+		{"id": int64(2), "summary": "one-hop trigger", "_onehop": []int64{20}},
+		{"id": int64(3), "summary": "direct frontier", "from_intent": int64(10)},
+		{"id": int64(4), "summary": "one-hop frontier", "_onehop": []int64{10}},
+		{"id": int64(5), "summary": "plain recent", "from_intent": int64(999)},
+	}
+	limits := DefaultOverviewConfig().Lean
+	limits.RecentFacts = 4
+	focus := &OverviewFocus{TriggerIntentIDs: []int64{20}}
+	lean := leanGraphOverviewData(full, LeanOptions{Limits: limits, Focus: focus})
+	facts := lean["recent_facts"].([]map[string]any)
+	if len(facts) != 4 {
+		t.Fatalf("facts=%d want 4", len(facts))
+	}
+	want := []int64{1, 2, 3, 4}
+	for i, id := range want {
+		if facts[i]["id"] != id {
+			t.Fatalf("order=%v want %v", testFactIDs(facts), want)
+		}
+	}
+}
+
+func TestLeanFactSelectionUsesPriorityAndRecency(t *testing.T) {
+	full := leanFixtureFull()
+	full["open_intents"] = []map[string]any{
+		{"id": int64(10), "summary": "frontier 10", "state": "open"},
+	}
+	full["running_intents"] = []map[string]any{}
+	// Same direct frontier source: importance breaks the tie, then recency.
+	full["recent_facts"] = []map[string]any{
+		{"id": int64(1), "summary": "high priority", "from_intent": int64(10), "_priority": 10},
+		{"id": int64(2), "summary": "low priority", "from_intent": int64(10), "_priority": 0},
+	}
+	limits := DefaultOverviewConfig().Lean
+	limits.RecentFacts = 1
+	lean := leanGraphOverviewData(full, LeanOptions{Limits: limits, Focus: &OverviewFocus{}})
+	facts := lean["recent_facts"].([]map[string]any)
+	if len(facts) != 1 || facts[0]["id"] != int64(1) {
+		t.Fatalf("priority order=%v want [1]", testFactIDs(facts))
+	}
+
+	full["recent_facts"] = []map[string]any{
+		{"id": int64(1), "summary": "old", "from_intent": int64(999)},
+		{"id": int64(2), "summary": "new", "from_intent": int64(999)},
+	}
+	limits.RecentFacts = 1
+	lean = leanGraphOverviewData(full, LeanOptions{Limits: limits, Focus: &OverviewFocus{TriggerIntentIDs: []int64{20}}})
+	facts = lean["recent_facts"].([]map[string]any)
+	if len(facts) != 1 || facts[0]["id"] != int64(2) {
+		t.Fatalf("recency order=%v want [2]", testFactIDs(facts))
+	}
+}
+
+func testFactIDs(rows []map[string]any) []int64 {
+	out := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		if id, ok := structuredInt64(row["id"]); ok {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func TestPositiveTriggerIntentIDsExcludesCancelled(t *testing.T) {

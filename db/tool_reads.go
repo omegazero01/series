@@ -168,18 +168,44 @@ func (s *ExplorationStore) ToolVisibleNodesByIDs(ctx context.Context, ids []int6
 		return nil, nil
 	}
 	query := workerReadSQL(toolNodeVisibilitySQL, s.workerRead) + `, selected AS (
- SELECT v.id FROM visible v WHERE v.id=ANY($10::bigint[])
- )
- SELECT ` + toolCompactNodeCols + `
- FROM exploration_nodes n
- WHERE n.exploration_id=$1 AND n.id IN (SELECT id FROM selected)
- ORDER BY n.id`
+SELECT v.id FROM visible v WHERE v.id=ANY($10::bigint[])
+)
+SELECT ` + toolCompactNodeCols + `
+FROM exploration_nodes n
+WHERE n.exploration_id=$1 AND n.id IN (SELECT id FROM selected)
+ORDER BY n.id`
 	rows, err := s.db.QueryContext(ctx, query, s.expID, KindFact, "", "", int64(0), int64(0), int64(len(ids)), false, []int64{}, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanNodes(rows)
+}
+
+// ToolIntentPriorities returns only the priority column for the given intent
+// IDs. Open intents are intentionally excluded by toolNodeVisibilitySQL, so
+// the scoring metadata read cannot reuse the history predicate; IDs originate
+// from the already-authorized overview, and no payload is returned here.
+func (s *ExplorationStore) ToolIntentPriorities(ctx context.Context, ids []int64) (map[int64]int, error) {
+	out := map[int64]int{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, priority FROM exploration_nodes
+WHERE exploration_id=$1 AND kind=$2 AND id=ANY($3::bigint[])`, s.expID, KindIntent, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var priority int
+		if err := rows.Scan(&id, &priority); err != nil {
+			return nil, err
+		}
+		out[id] = priority
+	}
+	return out, rows.Err()
 }
 
 func (s *ExplorationStore) ToolDigestMemberPage(digestID, before int64, limit int) ([]*Node, error) {

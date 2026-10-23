@@ -1202,10 +1202,26 @@ type FactYield struct {
 // and is used to expand the planner's fact candidate pool without one query per
 // frontier intent.
 func (s *ExplorationStore) FactsYieldedByIntents(ctx context.Context, intentIDs []int64, limit int) ([]FactYield, error) {
+	return s.factsLinkedToIntents(ctx, intentIDs, RelYields, limit)
+}
+
+// FactsDerivedFromIntents returns one-hop facts that point at one of the given
+// intents through an explicit derived_from edge. This is deliberately narrower
+// than a generic graph traversal: it only follows fact→intent provenance, so
+// the planner can reward facts synthesized from the current direction without
+// expanding the whole neighborhood.
+func (s *ExplorationStore) FactsDerivedFromIntents(ctx context.Context, intentIDs []int64, limit int) ([]FactYield, error) {
+	return s.factsLinkedToIntents(ctx, intentIDs, RelDerivedFrom, limit)
+}
+
+func (s *ExplorationStore) factsLinkedToIntents(ctx context.Context, intentIDs []int64, rel string, limit int) ([]FactYield, error) {
 	if len(intentIDs) == 0 || limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT n.id, e.src_id
+	var rows *sql.Rows
+	var err error
+	if rel == RelYields {
+		rows, err = s.db.QueryContext(ctx, `SELECT DISTINCT n.id, e.src_id
 		FROM exploration_edges e
 		JOIN exploration_nodes n
 		  ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
@@ -1217,7 +1233,22 @@ func (s *ExplorationStore) FactsYieldedByIntents(ctx context.Context, intentIDs 
 		  AND i.kind=$4
 		  AND n.kind=$5
 		ORDER BY n.id DESC, e.src_id
-		LIMIT $6`, s.expID, intentIDs, RelYields, KindIntent, KindFact, limit)
+		LIMIT $6`, s.expID, intentIDs, rel, KindIntent, KindFact, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `SELECT DISTINCT n.id, e.dst_id
+		FROM exploration_edges e
+		JOIN exploration_nodes n
+		  ON n.id=e.src_id AND n.exploration_id=e.exploration_id
+		JOIN exploration_nodes i
+		  ON i.id=e.dst_id AND i.exploration_id=e.exploration_id
+		WHERE e.exploration_id=$1
+		  AND e.dst_id=ANY($2::bigint[])
+		  AND e.rel=$3
+		  AND i.kind=$4
+		  AND n.kind=$5
+		ORDER BY n.id DESC, e.dst_id
+		LIMIT $6`, s.expID, intentIDs, rel, KindIntent, KindFact, limit)
+	}
 	if err != nil {
 		return nil, err
 	}

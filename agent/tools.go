@@ -797,6 +797,7 @@ func (t *ToolSet) expandOverviewFacts(base map[string]any, focus OverviewFocus, 
 		triggerCap = 10
 	}
 	sources := map[int64][]int64{}
+	oneHopSources := map[int64][]int64{}
 	order := make([]int64, 0, extraCap)
 	added := map[int64]struct{}{}
 	degraded := false
@@ -804,22 +805,48 @@ func (t *ToolSet) expandOverviewFacts(base map[string]any, focus OverviewFocus, 
 	addYields := func(yields []db.FactYield, groupLimit int) {
 		groupCount := 0
 		for _, y := range yields {
-			if y.FactID <= 0 || y.IntentID <= 0 || groupCount >= groupLimit || len(order) >= extraCap {
+			if y.FactID <= 0 || y.IntentID <= 0 {
 				continue
 			}
 			if row, ok := baseByID[y.FactID]; ok {
 				appendFactSource(row, y.IntentID)
 				continue
 			}
-			if _, ok := added[y.FactID]; !ok {
-				if len(order) >= extraCap {
-					break
-				}
-				added[y.FactID] = struct{}{}
-				order = append(order, y.FactID)
-				groupCount++
+			if _, ok := added[y.FactID]; ok {
+				sources[y.FactID] = appendUniqueInt64(sources[y.FactID], y.IntentID)
+				continue
 			}
+			if groupCount >= groupLimit || len(order) >= extraCap {
+				continue
+			}
+			added[y.FactID] = struct{}{}
+			order = append(order, y.FactID)
 			sources[y.FactID] = appendUniqueInt64(sources[y.FactID], y.IntentID)
+			groupCount++
+		}
+	}
+
+	addLinks := func(links []db.FactYield, groupLimit int) {
+		groupCount := 0
+		for _, l := range links {
+			if l.FactID <= 0 || l.IntentID <= 0 {
+				continue
+			}
+			if row, ok := baseByID[l.FactID]; ok {
+				appendFactOneHop(row, l.IntentID)
+				continue
+			}
+			if _, ok := added[l.FactID]; ok {
+				oneHopSources[l.FactID] = appendUniqueInt64(oneHopSources[l.FactID], l.IntentID)
+				continue
+			}
+			if groupCount >= groupLimit || len(order) >= extraCap {
+				continue
+			}
+			added[l.FactID] = struct{}{}
+			order = append(order, l.FactID)
+			oneHopSources[l.FactID] = appendUniqueInt64(oneHopSources[l.FactID], l.IntentID)
+			groupCount++
 		}
 	}
 
@@ -834,6 +861,19 @@ func (t *ToolSet) expandOverviewFacts(base map[string]any, focus OverviewFocus, 
 			addYields(yields, triggerCap)
 		}
 	}
+	oneHopCap := candidateCap / 4
+	if oneHopCap < 10 {
+		oneHopCap = 10
+	}
+	if len(order) < extraCap {
+		oneHopIntents := append(append([]int64{}, triggerList...), frontierList...)
+		links, err := t.ts.FactsDerivedFromIntents(ctx, oneHopIntents, oneHopCap*2)
+		if err != nil {
+			degraded = true
+		} else {
+			addLinks(links, oneHopCap)
+		}
+	}
 	if len(order) < extraCap && len(frontierList) > 0 {
 		yields, err := t.ts.FactsYieldedByIntents(ctx, frontierList, (extraCap-len(order))*2)
 		if err != nil {
@@ -841,6 +881,38 @@ func (t *ToolSet) expandOverviewFacts(base map[string]any, focus OverviewFocus, 
 		} else {
 			addYields(yields, extraCap-len(order))
 		}
+	}
+
+	sourceIDs := map[int64]struct{}{}
+	for _, row := range rows {
+		for _, id := range factRowSources(row) {
+			sourceIDs[id] = struct{}{}
+		}
+		for _, id := range factRowOneHop(row) {
+			sourceIDs[id] = struct{}{}
+		}
+	}
+	for id := range sources {
+		for _, source := range sources[id] {
+			sourceIDs[source] = struct{}{}
+		}
+	}
+	for id := range oneHopSources {
+		for _, source := range oneHopSources[id] {
+			sourceIDs[source] = struct{}{}
+		}
+	}
+	intentPriority := map[int64]int{}
+	if len(sourceIDs) > 0 {
+		priorities, err := t.ts.ToolIntentPriorities(ctx, mapKeys(sourceIDs))
+		if err != nil {
+			degraded = true
+		} else {
+			intentPriority = priorities
+		}
+	}
+	for _, row := range rows {
+		applyFactPriority(row, intentPriority)
 	}
 
 	if len(order) > 0 {
@@ -876,10 +948,15 @@ func (t *ToolSet) expandOverviewFacts(base map[string]any, focus OverviewFocus, 
 					}
 				}
 				src := primaryFactSource(sources[id], triggerIDs, frontierIDs)
+				if src == 0 {
+					src = primaryFactSource(oneHopSources[id], triggerIDs, frontierIDs)
+				}
 				if src > 0 {
 					m["from_intent"] = src
 				}
 				m["_sources"] = sources[id]
+				m["_onehop"] = oneHopSources[id]
+				applyFactPriority(m, intentPriority)
 				rows = append(rows, m)
 			}
 		}
@@ -911,6 +988,56 @@ func appendFactSource(row map[string]any, intentID int64) {
 	row["_sources"] = existing
 	if _, ok := structuredInt64(row["from_intent"]); !ok {
 		row["from_intent"] = intentID
+	}
+}
+
+func appendFactOneHop(row map[string]any, intentID int64) {
+	if row == nil || intentID <= 0 {
+		return
+	}
+	existing := factRowOneHop(row)
+	existing = appendUniqueInt64(existing, intentID)
+	row["_onehop"] = existing
+	if _, ok := structuredInt64(row["from_intent"]); !ok {
+		row["from_intent"] = intentID
+	}
+}
+
+func factRowOneHop(row map[string]any) []int64 {
+	if raw, ok := row["_onehop"]; ok {
+		switch v := raw.(type) {
+		case []int64:
+			return v
+		case []any:
+			out := make([]int64, 0, len(v))
+			for _, item := range v {
+				if id, ok := structuredInt64(item); ok {
+					out = append(out, id)
+				}
+			}
+			return out
+		}
+	}
+	return nil
+}
+
+func applyFactPriority(row map[string]any, priorities map[int64]int) {
+	if row == nil || len(priorities) == 0 {
+		return
+	}
+	best := 0
+	for _, id := range factRowSources(row) {
+		if p := priorities[id]; p > best {
+			best = p
+		}
+	}
+	for _, id := range factRowOneHop(row) {
+		if p := priorities[id]; p > best {
+			best = p
+		}
+	}
+	if best > 0 {
+		row["_priority"] = best
 	}
 }
 

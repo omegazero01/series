@@ -162,6 +162,16 @@ func leanIntentRows(rows []map[string]any, limit int, terminal bool) []map[strin
 	return out
 }
 
+const (
+	factScoreTriggerDirect    = 100
+	factScoreTriggerOneHop    = 80
+	factScoreFrontierDirect   = 40
+	factScoreFrontierOneHop   = 15
+	factScoreEvidenceObserved = 3
+	factScoreMaxRecency       = 5
+	factScoreMaxImportance    = 5
+)
+
 func leanFactRows(rows []map[string]any, limit int, focus *OverviewFocus, frontierIDs map[int64]struct{}) []map[string]any {
 	if focus == nil || len(focus.TriggerIntentIDs) == 0 && len(frontierIDs) == 0 {
 		rows = capOverviewRows(rows, limit)
@@ -171,6 +181,7 @@ func leanFactRows(rows []map[string]any, limit int, focus *OverviewFocus, fronti
 	for _, id := range focus.TriggerIntentIDs {
 		triggerIDs[id] = struct{}{}
 	}
+	minID, maxID := factIDRange(rows)
 	type candidate struct {
 		row        map[string]any
 		index      int
@@ -180,24 +191,38 @@ func leanFactRows(rows []map[string]any, limit int, focus *OverviewFocus, fronti
 	}
 	candidates := make([]candidate, 0, len(rows))
 	for i, row := range rows {
-		sources := factRowSources(row)
+		direct := factRowSources(row)
+		oneHop := factRowOneHop(row)
 		score := 0
-		primary := int64(0)
-		for _, source := range sources {
-			if _, ok := triggerIDs[source]; ok {
-				score = 2
-				primary = source
-				break
-			}
-			if _, ok := frontierIDs[source]; ok && score < 1 {
-				score = 1
-				primary = source
-			}
+		switch {
+		case intersectsIDs(direct, triggerIDs):
+			score = factScoreTriggerDirect
+		case intersectsIDs(oneHop, triggerIDs):
+			score = factScoreTriggerOneHop
+		case intersectsIDs(direct, frontierIDs):
+			score = factScoreFrontierDirect
+		case intersectsIDs(oneHop, frontierIDs):
+			score = factScoreFrontierOneHop
 		}
-		if primary == 0 && len(sources) > 0 {
-			primary = sources[0]
-		}
+		id, _ := structuredInt64(row["id"])
+		score += factRecencyScore(id, minID, maxID)
 		confidence, _ := row["confidence"].(string)
+		if confidence == "observed" {
+			score += factScoreEvidenceObserved
+		}
+		if priority, ok := structuredInt64(row["_priority"]); ok && priority > 0 {
+			score += int(min(priority/2, factScoreMaxImportance))
+		}
+		primary := primaryFactSource(direct, triggerIDs, frontierIDs)
+		if primary == 0 {
+			primary = primaryFactSource(oneHop, triggerIDs, frontierIDs)
+		}
+		if primary == 0 && len(direct) > 0 {
+			primary = direct[0]
+		}
+		if primary == 0 && len(oneHop) > 0 {
+			primary = oneHop[0]
+		}
 		candidates = append(candidates, candidate{row: row, index: i, score: score, primary: primary, confidence: confidence})
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -228,6 +253,49 @@ func leanFactRows(rows []map[string]any, limit int, focus *OverviewFocus, fronti
 		selected = capOverviewRows(rows, limit)
 	}
 	return leanFactMaps(selected)
+}
+
+func intersectsIDs(values []int64, set map[int64]struct{}) bool {
+	for _, value := range values {
+		if _, ok := set[value]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func factIDRange(rows []map[string]any) (int64, int64) {
+	var minID, maxID int64
+	for _, row := range rows {
+		id, ok := structuredInt64(row["id"])
+		if !ok || id <= 0 {
+			continue
+		}
+		if minID == 0 || id < minID {
+			minID = id
+		}
+		if id > maxID {
+			maxID = id
+		}
+	}
+	return minID, maxID
+}
+
+// factRecencyScore treats node id as the creation-order proxy. It avoids an
+// extra timestamp query and still gives a small, bounded tie-breaker inside a
+// priority band.
+func factRecencyScore(id, minID, maxID int64) int {
+	if id <= 0 || maxID <= minID {
+		return 0
+	}
+	score := int((id - minID) * factScoreMaxRecency / (maxID - minID))
+	if score < 0 {
+		return 0
+	}
+	if score > factScoreMaxRecency {
+		return factScoreMaxRecency
+	}
+	return score
 }
 
 // leanFactMaps projects the selected rows. `_sources` is an internal field from
