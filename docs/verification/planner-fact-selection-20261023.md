@@ -47,7 +47,7 @@
   - `dist/series-windows-amd64/series-fact-weights.exe`
   - SHA-256：`5a3a6608a61eecf2c516e8882544a413a3c51d8c2014305c126d444347500a0c`
   - 版本：`fact-weights-20261023`
-  - **未替换根目录 `series.exe`**：当前有 `series.exe` 正在运行；停止后用该文件替换。
+  - 已替换根目录 `series.exe`；旧版本备份为 `series.exe.bak-20261023-1130`。
 
 ## 未做
 
