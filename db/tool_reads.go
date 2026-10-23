@@ -159,6 +159,29 @@ func (s *ExplorationStore) ToolNodesByIDs(ids []int64) ([]*Node, error) {
 	return scanNodes(rows)
 }
 
+// ToolVisibleNodesByIDs is the batch, authorization-aware counterpart of
+// ToolNodesByIDs. It reuses the same visibility graph as ToolLocalNodePage so
+// planner-side candidate expansion cannot expose nodes that the normal facts
+// query would hide. Only local task nodes are returned (sources=false).
+func (s *ExplorationStore) ToolVisibleNodesByIDs(ctx context.Context, ids []int64) ([]*Node, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	query := workerReadSQL(toolNodeVisibilitySQL, s.workerRead) + `, selected AS (
+ SELECT v.id FROM visible v WHERE v.id=ANY($10::bigint[])
+ )
+ SELECT ` + toolCompactNodeCols + `
+ FROM exploration_nodes n
+ WHERE n.exploration_id=$1 AND n.id IN (SELECT id FROM selected)
+ ORDER BY n.id`
+	rows, err := s.db.QueryContext(ctx, query, s.expID, KindFact, "", "", int64(0), int64(0), int64(len(ids)), false, []int64{}, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
 func (s *ExplorationStore) ToolDigestMemberPage(digestID, before int64, limit int) ([]*Node, error) {
 	rows, err := s.db.Query(`SELECT n.id,n.kind,jsonb_strip_nulls(jsonb_build_object('summary',left(n.payload->>'summary',360),'confidence',n.payload->'confidence')),
  n.priority,n.state,COALESCE(n.origin,''),COALESCE(n.owner,''),COALESCE(n.blocked_reason,''),n.created_at

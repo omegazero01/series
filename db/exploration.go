@@ -1189,6 +1189,50 @@ func (s *ExplorationStore) Edges(limit int) ([]Edge, error) {
 	return out, rows.Err()
 }
 
+// FactYield identifies a fact produced by an intent. A fact can be produced by
+// more than one intent, so callers should preserve the pair rather than
+// collapsing to a single from_intent.
+type FactYield struct {
+	FactID   int64
+	IntentID int64
+}
+
+// FactsYieldedByIntents returns the direct intent --yields--> fact edges for
+// the given intents, newest first. It is the batch counterpart of FactsYielded
+// and is used to expand the planner's fact candidate pool without one query per
+// frontier intent.
+func (s *ExplorationStore) FactsYieldedByIntents(ctx context.Context, intentIDs []int64, limit int) ([]FactYield, error) {
+	if len(intentIDs) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT n.id, e.src_id
+		FROM exploration_edges e
+		JOIN exploration_nodes n
+		  ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
+		JOIN exploration_nodes i
+		  ON i.id=e.src_id AND i.exploration_id=e.exploration_id
+		WHERE e.exploration_id=$1
+		  AND e.src_id=ANY($2::bigint[])
+		  AND e.rel=$3
+		  AND i.kind=$4
+		  AND n.kind=$5
+		ORDER BY n.id DESC, e.src_id
+		LIMIT $6`, s.expID, intentIDs, RelYields, KindIntent, KindFact, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]FactYield, 0, limit)
+	for rows.Next() {
+		var f FactYield
+		if err := rows.Scan(&f.FactID, &f.IntentID); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 // FactsYielded returns the ids of fact nodes an intent produced (intent --yields-->
 // fact), oldest first. Used to spell out the round's incremental facts to the planner
 // alongside the finished worker's output. Best-effort: returns nil for an intent with

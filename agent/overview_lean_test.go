@@ -216,3 +216,209 @@ func TestPlannerOverviewProfileDefault(t *testing.T) {
 		t.Fatalf("unknown resolver=%q want full", got)
 	}
 }
+
+func TestLeanFactSelectionRanksTriggerThenFrontier(t *testing.T) {
+	full := leanFixtureFull()
+	full["open_intents"] = []map[string]any{
+		{"id": int64(10), "summary": "frontier 10", "state": "open"},
+		{"id": int64(11), "summary": "frontier 11", "state": "open"},
+	}
+	full["running_intents"] = []map[string]any{}
+	full["recent_facts"] = []map[string]any{
+		{"id": int64(1), "summary": "recent only", "from_intent": int64(999)},
+		{"id": int64(2), "summary": "frontier 10 fact", "from_intent": int64(10)},
+		{"id": int64(3), "summary": "trigger 20 fact", "from_intent": int64(20)},
+		{"id": int64(4), "summary": "frontier 11 fact", "from_intent": int64(11)},
+		{"id": int64(5), "summary": "trigger 21 fact", "from_intent": int64(21)},
+	}
+	limits := DefaultOverviewConfig().Lean
+	limits.RecentFacts = 3
+	focus := &OverviewFocus{TriggerIntentIDs: []int64{20, 21}}
+	lean := leanGraphOverviewData(full, LeanOptions{Limits: limits, Focus: focus})
+	facts := lean["recent_facts"].([]map[string]any)
+	if len(facts) != 3 {
+		t.Fatalf("facts=%d want 3", len(facts))
+	}
+	if facts[0]["id"] != int64(3) || facts[1]["id"] != int64(5) || facts[2]["id"] != int64(2) {
+		t.Fatalf("order=%v want [3 5 2]", []any{facts[0]["id"], facts[1]["id"], facts[2]["id"]})
+	}
+	if _, leaked := facts[0]["_sources"]; leaked {
+		t.Fatal("_sources leaked into lean output")
+	}
+}
+
+func TestLeanFactSelectionUsesConfiguredLimit(t *testing.T) {
+	full := leanFixtureFull()
+	full["recent_facts"] = leanFixtureRows(25, func(i int) map[string]any {
+		return map[string]any{"id": int64(400 + i), "summary": "fact", "from_intent": int64(999)}
+	})
+	for _, want := range []int{8, 12, 20} {
+		limits := DefaultOverviewConfig().Lean
+		limits.RecentFacts = want
+		lean := leanGraphOverviewData(full, LeanOptions{Limits: limits})
+		if got := len(lean["recent_facts"].([]map[string]any)); got != want {
+			t.Fatalf("recent_facts=%d want %d", got, want)
+		}
+	}
+}
+
+func TestFactSelectionEnabled(t *testing.T) {
+	t.Setenv("SERIES_PLANNER_FACT_SELECTION", "off")
+	if factSelectionEnabled() {
+		t.Fatal("off should disable fact selection")
+	}
+	t.Setenv("SERIES_PLANNER_FACT_SELECTION", "on")
+	if !factSelectionEnabled() {
+		t.Fatal("on should enable fact selection")
+	}
+	t.Setenv("SERIES_PLANNER_FACT_SELECTION", "")
+	if !factSelectionEnabled() {
+		t.Fatal("empty should default to enabled for lean")
+	}
+}
+
+func TestLeanFactRowsPreservesLegacyOrderWithoutFocus(t *testing.T) {
+	full := leanFixtureFull()
+	full["recent_facts"] = []map[string]any{
+		{"id": int64(1), "summary": "first", "from_intent": int64(999)},
+		{"id": int64(2), "summary": "second", "from_intent": int64(10)},
+		{"id": int64(3), "summary": "third", "from_intent": int64(999)},
+	}
+	limits := DefaultOverviewConfig().Lean
+	limits.RecentFacts = 2
+	lean := leanGraphOverviewData(full, LeanOptions{Limits: limits})
+	facts := lean["recent_facts"].([]map[string]any)
+	if len(facts) != 2 || facts[0]["id"] != int64(1) || facts[1]["id"] != int64(2) {
+		t.Fatalf("legacy order=%v", []any{facts[0]["id"], facts[1]["id"]})
+	}
+}
+
+func TestPositiveTriggerIntentIDsExcludesCancelled(t *testing.T) {
+	got := positiveTriggerIntentIDs([]TriggerEvent{
+		{Kind: "done", IntentID: 7},
+		{Kind: "cancelled", IntentID: 7},
+		{Kind: "finding", IntentID: 8},
+		{Kind: "hint", IntentID: 9},
+		{Kind: "done", IntentID: 7},
+	})
+	if len(got) != 2 || got[0] != 7 || got[1] != 8 {
+		t.Fatalf("focus=%v want [7 8]", got)
+	}
+}
+
+func TestOverviewConfigDefaultsAndValidation(t *testing.T) {
+	def := DefaultOverviewConfig()
+	if def.Full.BudgetRunes != plannerOverviewRunes || def.Lean.BudgetRunes != plannerLeanOverviewRunes {
+		t.Fatalf("budgets=%+v", def)
+	}
+	if def.Full.RecentFacts != 20 || def.Lean.RecentFacts != 8 {
+		t.Fatalf("facts=%+v", def)
+	}
+	if err := ValidateOverviewConfig(def); err != nil {
+		t.Fatalf("default config invalid: %v", err)
+	}
+	bad := def
+	bad.Lean.RecentFacts = 21
+	if err := ValidateOverviewConfig(bad); err == nil {
+		t.Fatal("expected facts > max to be rejected")
+	}
+	bad = def
+	bad.Full.BudgetRunes = 1999
+	if err := ValidateOverviewConfig(bad); err == nil {
+		t.Fatal("expected budget < min to be rejected")
+	}
+	partial := OverviewConfig{Lean: OverviewLimits{RecentFacts: 0}}
+	if err := ValidateOverviewConfig(partial); err != nil {
+		t.Fatalf("zero should mean default: %v", err)
+	}
+	norm := partial.Normalize()
+	if norm.Lean.RecentFacts != 8 || norm.Full.RecentFacts != 20 {
+		t.Fatalf("normalized=%+v", norm)
+	}
+}
+
+func TestLeanGraphOverviewUsesCustomLimits(t *testing.T) {
+	full := leanFixtureFull()
+	limits := DefaultOverviewConfig().Lean
+	limits.Goals = 4
+	limits.RecentFacts = 2
+	limits.Findings = 1
+	limits.RecentDoneIntents = 3
+	limits.Hints = 4
+	limits.ColdDigests = 1
+	lean := leanGraphOverviewData(full, LeanOptions{Limits: limits})
+	if got := len(lean["goals"].([]map[string]any)); got != 4 {
+		t.Fatalf("goals=%d want 4", got)
+	}
+	if got := len(lean["recent_facts"].([]map[string]any)); got != 2 {
+		t.Fatalf("facts=%d want 2", got)
+	}
+	if got := len(lean["finding_list"].([]map[string]any)); got != 1 {
+		t.Fatalf("findings=%d want 1", got)
+	}
+	if got := len(lean["recent_done_intents"].([]map[string]any)); got != 3 {
+		t.Fatalf("done=%d want 3", got)
+	}
+	if got := len(lean["hints"].([]map[string]any)); got != 4 {
+		t.Fatalf("hints=%d want 4", got)
+	}
+	if got := len(lean["cold_digests"].([]map[string]any)); got != 1 {
+		t.Fatalf("digests=%d want 1", got)
+	}
+	if got := len(lean["open_intents"].([]map[string]any)); got != 25 {
+		t.Fatalf("frontier=%d want all 25", got)
+	}
+	if got := len(lean["running_intents"].([]map[string]any)); got != 3 {
+		t.Fatalf("running=%d want all 3", got)
+	}
+}
+
+func TestTrimGraphOverviewDataKeepsFrontier(t *testing.T) {
+	full := leanFixtureFull()
+	limits := DefaultOverviewConfig().Full
+	limits.Goals = 4
+	limits.RecentFacts = 3
+	limits.Findings = 2
+	limits.RecentDoneIntents = 4
+	limits.Hints = 5
+	limits.ColdDigests = 2
+	trimmed := trimGraphOverviewData(full, limits)
+	if got := len(trimmed["goals"].([]map[string]any)); got != 4 {
+		t.Fatalf("goals=%d want 4", got)
+	}
+	if got := len(trimmed["recent_facts"].([]map[string]any)); got != 3 {
+		t.Fatalf("facts=%d want 3", got)
+	}
+	if got := len(trimmed["open_intents"].([]map[string]any)); got != 25 {
+		t.Fatalf("frontier=%d want all 25", got)
+	}
+	if got := len(trimmed["running_intents"].([]map[string]any)); got != 3 {
+		t.Fatalf("running=%d want all 3", got)
+	}
+	if got := len(full["recent_facts"].([]map[string]any)); got != 12 {
+		t.Fatalf("source facts mutated=%d", got)
+	}
+}
+
+func TestRenderGraphOverviewUsesCustomLimits(t *testing.T) {
+	full := leanFixtureFull()
+	cfg := DefaultOverviewConfig()
+	cfg.Lean.RecentFacts = 2
+	cfg.Lean.Findings = 1
+	rendered := renderGraphOverview(full, OverviewLean, OverviewRenderOptions{Config: cfg})
+	start := strings.Index(rendered, "<graph_overview>")
+	end := strings.Index(rendered, "</graph_overview>")
+	if start < 0 || end <= start {
+		t.Fatalf("missing graph_overview tags: %q", rendered)
+	}
+	var view map[string]any
+	if err := json.Unmarshal([]byte(rendered[start+len("<graph_overview>"):end]), &view); err != nil {
+		t.Fatalf("decode overview: %v", err)
+	}
+	if got := len(view["recent_facts"].([]any)); got > 2 {
+		t.Fatalf("rendered facts=%d want <=2", got)
+	}
+	if got := len(view["finding_list"].([]any)); got > 1 {
+		t.Fatalf("rendered findings=%d want <=1", got)
+	}
+}

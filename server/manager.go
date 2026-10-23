@@ -332,6 +332,9 @@ const (
 	// 实验功能:Planner 每轮预注入的态势窗口。full=当前完整窗口;lean=只注入目标、
 	// frontier、最近事实和读取入口。图/权限/审计不变;每轮读取,切换即时生效。
 	settingPlannerOverviewMode = "planner_overview_mode"
+	// Planner 态势窗口的完整/精简数值。存 JSON，零值表示使用内置默认值；
+	// 每轮读取，修改在下一轮规划生效。
+	settingPlannerOverviewConfig = "planner_overview_config"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
 	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
@@ -747,6 +750,40 @@ func (m *Manager) SetPlannerOverviewMode(mode string) error {
 		return fmt.Errorf("planner_overview_mode 必须是 full 或 lean")
 	}
 	return m.pg.SetSetting(settingPlannerOverviewMode, mode)
+}
+
+// PlannerOverviewConfig returns the editable numerical limits for both
+// presets. Missing/corrupt JSON falls back to the built-in defaults. When
+// SERIES_PLANNER_OVERVIEW is set (isolated benchmark), custom values are
+// ignored so the A/B comparison is deterministic.
+func (m *Manager) PlannerOverviewConfig() agent.OverviewConfig {
+	if v := strings.TrimSpace(os.Getenv("SERIES_PLANNER_OVERVIEW")); v != "" {
+		return agent.DefaultOverviewConfig()
+	}
+	raw, ok, err := m.pg.GetSetting(settingPlannerOverviewConfig)
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return agent.DefaultOverviewConfig()
+	}
+	var cfg agent.OverviewConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		log.Printf("[settings] planner_overview_config 解析失败，使用默认值: %v", err)
+		return agent.DefaultOverviewConfig()
+	}
+	return cfg.Normalize()
+}
+
+// SetPlannerOverviewConfig validates and persists both presets. The planner
+// reads the normalized value once per planning round.
+func (m *Manager) SetPlannerOverviewConfig(cfg agent.OverviewConfig) error {
+	if err := agent.ValidateOverviewConfig(cfg); err != nil {
+		return err
+	}
+	cfg = cfg.Normalize()
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return m.pg.SetSetting(settingPlannerOverviewConfig, string(raw))
 }
 
 // LLMPoolEnabled reports whether LLM failover ("轮询") is on (默认关；

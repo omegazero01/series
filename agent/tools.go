@@ -748,6 +748,206 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	return out
 }
 
+func (t *ToolSet) expandOverviewFacts(base map[string]any, focus OverviewFocus, limits OverviewLimits) map[string]any {
+	if base == nil {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(base))
+	for key, value := range base {
+		out[key] = value
+	}
+	baseRows, _ := overviewRows(base["recent_facts"])
+	rows := make([]map[string]any, 0, len(baseRows))
+	for _, row := range baseRows {
+		copied := make(map[string]any, len(row))
+		for key, value := range row {
+			copied[key] = value
+		}
+		rows = append(rows, copied)
+	}
+	out["recent_facts"] = rows
+	if t == nil || t.ts == nil {
+		return out
+	}
+
+	baseByID := make(map[int64]map[string]any, len(rows))
+	for _, row := range rows {
+		if id, ok := structuredInt64(row["id"]); ok {
+			baseByID[id] = row
+		}
+	}
+	frontierIDs := overviewIDSet(base["open_intents"], base["running_intents"])
+	triggerIDs := make(map[int64]struct{}, len(focus.TriggerIntentIDs))
+	for _, id := range focus.TriggerIntentIDs {
+		if id > 0 {
+			triggerIDs[id] = struct{}{}
+		}
+	}
+	if len(triggerIDs) == 0 && len(frontierIDs) == 0 {
+		return out
+	}
+
+	candidateCap := overviewFactCandidateCap(limits)
+	extraCap := candidateCap - len(rows)
+	if extraCap <= 0 {
+		return out
+	}
+	triggerCap := candidateCap / 4
+	if triggerCap < 10 {
+		triggerCap = 10
+	}
+	sources := map[int64][]int64{}
+	order := make([]int64, 0, extraCap)
+	added := map[int64]struct{}{}
+	degraded := false
+
+	addYields := func(yields []db.FactYield, groupLimit int) {
+		groupCount := 0
+		for _, y := range yields {
+			if y.FactID <= 0 || y.IntentID <= 0 || groupCount >= groupLimit || len(order) >= extraCap {
+				continue
+			}
+			if row, ok := baseByID[y.FactID]; ok {
+				appendFactSource(row, y.IntentID)
+				continue
+			}
+			if _, ok := added[y.FactID]; !ok {
+				if len(order) >= extraCap {
+					break
+				}
+				added[y.FactID] = struct{}{}
+				order = append(order, y.FactID)
+				groupCount++
+			}
+			sources[y.FactID] = appendUniqueInt64(sources[y.FactID], y.IntentID)
+		}
+	}
+
+	ctx := context.Background()
+	triggerList := mapKeys(triggerIDs)
+	frontierList := mapKeys(frontierIDs)
+	if len(triggerList) > 0 {
+		yields, err := t.ts.FactsYieldedByIntents(ctx, triggerList, triggerCap*2)
+		if err != nil {
+			degraded = true
+		} else {
+			addYields(yields, triggerCap)
+		}
+	}
+	if len(order) < extraCap && len(frontierList) > 0 {
+		yields, err := t.ts.FactsYieldedByIntents(ctx, frontierList, (extraCap-len(order))*2)
+		if err != nil {
+			degraded = true
+		} else {
+			addYields(yields, extraCap-len(order))
+		}
+	}
+
+	if len(order) > 0 {
+		nodes, err := t.ts.ToolVisibleNodesByIDs(ctx, order)
+		if err != nil {
+			degraded = true
+		} else {
+			nodeByID := make(map[int64]*db.Node, len(nodes))
+			for _, node := range nodes {
+				if node != nil {
+					nodeByID[node.ID] = node
+				}
+			}
+			covered := t.authorizedCoveredMembers(t.ts, t.taskID)
+			var hot map[int64]bool
+			if len(covered) > 0 {
+				hot, _ = t.ts.ToolHotNodeIDs(ctx)
+			}
+			hidden := func(id int64) bool {
+				_, isCovered := covered[id]
+				return isCovered && !hot[id]
+			}
+			for _, id := range order {
+				node := nodeByID[id]
+				if node == nil || hidden(id) {
+					continue
+				}
+				m := compactNode(node)
+				var fp map[string]any
+				if json.Unmarshal(node.Payload, &fp) == nil {
+					if c, ok := fp["confidence"].(string); ok && c != "" {
+						m["confidence"] = c
+					}
+				}
+				src := primaryFactSource(sources[id], triggerIDs, frontierIDs)
+				if src > 0 {
+					m["from_intent"] = src
+				}
+				m["_sources"] = sources[id]
+				rows = append(rows, m)
+			}
+		}
+	}
+	out["recent_facts"] = rows
+	if degraded {
+		out["partial"] = true
+	}
+	return out
+}
+
+func overviewFactCandidateCap(limits OverviewLimits) int {
+	n := limits.RecentFacts * 4
+	if n < 60 {
+		n = 60
+	}
+	if n > 120 {
+		n = 120
+	}
+	return n
+}
+
+func appendFactSource(row map[string]any, intentID int64) {
+	if row == nil || intentID <= 0 {
+		return
+	}
+	existing := factRowSources(row)
+	existing = appendUniqueInt64(existing, intentID)
+	row["_sources"] = existing
+	if _, ok := structuredInt64(row["from_intent"]); !ok {
+		row["from_intent"] = intentID
+	}
+}
+
+func primaryFactSource(sources []int64, triggerIDs, frontierIDs map[int64]struct{}) int64 {
+	for _, id := range sources {
+		if _, ok := triggerIDs[id]; ok {
+			return id
+		}
+	}
+	for _, id := range sources {
+		if _, ok := frontierIDs[id]; ok {
+			return id
+		}
+	}
+	if len(sources) > 0 {
+		return sources[0]
+	}
+	return 0
+}
+
+func appendUniqueInt64(values []int64, value int64) []int64 {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func mapKeys(values map[int64]struct{}) []int64 {
+	out := make([]int64, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	return out
+}
+
 func (t *ToolSet) filterAuthorizedNodesForStore(nodes []*db.Node, store *db.ExplorationStore, ownerTaskID int64) []*db.Node {
 	out, _ := t.authorizedNodesForStore(nodes, store, ownerTaskID)
 	return out

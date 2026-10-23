@@ -26,9 +26,68 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
-import type { GlobalProxyProbeResult, Settings } from "@/lib/types";
+import type { GlobalProxyProbeResult, PlannerOverviewConfig, PlannerOverviewLimits, Settings } from "@/lib/types";
 
 import { HTTPAuthCard } from "./http-auth-card";
+
+const DEFAULT_PLANNER_OVERVIEW_CONFIG: PlannerOverviewConfig = {
+  full: {
+    budget_runes: 24000,
+    goals: 100,
+    recent_facts: 20,
+    findings: 10,
+    recent_done_intents: 12,
+    hints: 50,
+    cold_digests: 15,
+  },
+  lean: {
+    budget_runes: 10000,
+    goals: 20,
+    recent_facts: 8,
+    findings: 3,
+    recent_done_intents: 5,
+    hints: 10,
+    cold_digests: 3,
+  },
+};
+
+type PlannerLimitKey = keyof PlannerOverviewLimits;
+
+const PLANNER_LIMIT_FIELDS: Array<{
+  key: PlannerLimitKey;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+}> = [
+  { key: "budget_runes", label: "总字符预算", min: 2000, max: 48000, step: 500 },
+  { key: "goals", label: "目标条数", min: 1, max: 100, step: 1 },
+  { key: "recent_facts", label: "最近事实条数", min: 1, max: 20, step: 1 },
+  { key: "findings", label: "发现条数", min: 1, max: 10, step: 1 },
+  { key: "recent_done_intents", label: "最近完成意图", min: 1, max: 12, step: 1 },
+  { key: "hints", label: "提示条数", min: 1, max: 50, step: 1 },
+  { key: "cold_digests", label: "冷摘要条数", min: 1, max: 15, step: 1 },
+];
+
+function mergePlannerLimits(base: PlannerOverviewLimits, value?: Partial<PlannerOverviewLimits>): PlannerOverviewLimits {
+  const pick = (n: number | undefined, fallback: number) => (typeof n === "number" && n > 0 ? n : fallback);
+  return {
+    budget_runes: pick(value?.budget_runes, base.budget_runes),
+    goals: pick(value?.goals, base.goals),
+    recent_facts: pick(value?.recent_facts, base.recent_facts),
+    findings: pick(value?.findings, base.findings),
+    recent_done_intents: pick(value?.recent_done_intents, base.recent_done_intents),
+    hints: pick(value?.hints, base.hints),
+    cold_digests: pick(value?.cold_digests, base.cold_digests),
+  };
+}
+
+function normalizePlannerOverviewConfig(value?: PlannerOverviewConfig): PlannerOverviewConfig {
+  return {
+    full: mergePlannerLimits(DEFAULT_PLANNER_OVERVIEW_CONFIG.full, value?.full),
+    lean: mergePlannerLimits(DEFAULT_PLANNER_OVERVIEW_CONFIG.lean, value?.lean),
+  };
+}
 
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
@@ -71,6 +130,9 @@ export default function SystemSettingsPage() {
   const [noaCompaction, setNoaCompaction] = React.useState(false);
   // 实验功能:Planner 态势窗口(默认 full)。
   const [plannerOverviewMode, setPlannerOverviewMode] = React.useState<"full" | "lean">("full");
+  const [plannerOverviewConfig, setPlannerOverviewConfig] = React.useState<PlannerOverviewConfig>(DEFAULT_PLANNER_OVERVIEW_CONFIG);
+  const [showPlannerAdvanced, setShowPlannerAdvanced] = React.useState(false);
+  const [savingPlannerConfig, setSavingPlannerConfig] = React.useState(false);
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
 
@@ -103,6 +165,7 @@ export default function SystemSettingsPage() {
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
     setPlannerOverviewMode(s.planner_overview_mode === "lean" ? "lean" : "full");
+    setPlannerOverviewConfig(normalizePlannerOverviewConfig(s.planner_overview_config));
   }, []);
 
   const saveWorkers = () => {
@@ -258,6 +321,46 @@ export default function SystemSettingsPage() {
         setPlannerOverviewMode(prev); // revert on failure
         toast.error(`保存失败：${(e as Error).message}`);
       });
+  };
+
+  const plannerLimits = plannerOverviewConfig[plannerOverviewMode];
+
+  const updatePlannerLimit = (key: PlannerLimitKey, value: number) => {
+    setPlannerOverviewConfig((prev) => ({
+      ...prev,
+      [plannerOverviewMode]: {
+        ...prev[plannerOverviewMode],
+        [key]: value,
+      },
+    }));
+  };
+
+  const resetPlannerLimits = () => {
+    setPlannerOverviewConfig((prev) => ({
+      ...prev,
+      [plannerOverviewMode]: { ...DEFAULT_PLANNER_OVERVIEW_CONFIG[plannerOverviewMode] },
+    }));
+    toast.info("已填入当前模式的默认值；点“保存数值”后生效");
+  };
+
+  const resetAllPlannerLimits = () => {
+    setPlannerOverviewConfig({
+      full: { ...DEFAULT_PLANNER_OVERVIEW_CONFIG.full },
+      lean: { ...DEFAULT_PLANNER_OVERVIEW_CONFIG.lean },
+    });
+    toast.info("已填入完整/精简的全部默认值；点“保存数值”后生效");
+  };
+
+  const savePlannerOverviewConfig = () => {
+    setSavingPlannerConfig(true);
+    api
+      .setSettings({ planner_overview_config: plannerOverviewConfig })
+      .then((s) => {
+        apply(s);
+        toast.success("已保存 Planner 态势窗口数值（下一轮规划生效）");
+      })
+      .catch((e) => toast.error(`保存失败：${(e as Error).message}`))
+      .finally(() => setSavingPlannerConfig(false));
   };
 
   // Persist a web-search patch (enable and/or backend). Optimistic with refetch.
@@ -784,27 +887,83 @@ export default function SystemSettingsPage() {
             </CardTitle>
             <CardDescription>
               控制 Planner 每轮预注入的探索图摘要，默认<b>完整</b>。<b>精简</b>
-              只注入目标、当前待办/运行方向、最近事实和读取入口，细节由 Planner 按需检索。 探索图、权限、审计和 UI
-              回放不受影响；切换在下一轮规划生效，无需重建 Agent。
+              只注入目标、当前待办/运行方向、最近事实和读取入口，细节由 Planner 按需检索。两种模式的条数和字符预算可在
+              <b>高级参数</b>中调整；探索图、权限、审计和 UI 回放不受影响。切换/保存数值在下一轮规划生效，无需重建 Agent。
             </CardDescription>
           </CardHeader>
-          <CardContent className="flex items-center justify-between gap-4">
-            <Label htmlFor="planner-overview-mode" className="text-sm font-normal text-muted-foreground">
-              当前：{plannerOverviewMode === "lean" ? "精简（实验）" : "完整"}
-            </Label>
-            <Select
-              value={plannerOverviewMode}
-              onValueChange={(v) => savePlannerOverviewMode(v as "full" | "lean")}
-              disabled={!loaded}
-            >
-              <SelectTrigger id="planner-overview-mode" className="w-56">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="full">完整（当前默认）</SelectItem>
-                <SelectItem value="lean">精简（实验）</SelectItem>
-              </SelectContent>
-            </Select>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <Label htmlFor="planner-overview-mode" className="text-sm font-normal text-muted-foreground">
+                当前：{plannerOverviewMode === "lean" ? "精简（可调）" : "完整（可调）"}
+              </Label>
+              <div className="flex items-center gap-2">
+                <Select
+                  value={plannerOverviewMode}
+                  onValueChange={(v) => savePlannerOverviewMode(v as "full" | "lean")}
+                  disabled={!loaded}
+                >
+                  <SelectTrigger id="planner-overview-mode" className="w-48">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="full">完整（默认）</SelectItem>
+                    <SelectItem value="lean">精简（实验）</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowPlannerAdvanced((v) => !v)}
+                  disabled={!loaded}
+                >
+                  {showPlannerAdvanced ? "收起参数" : "高级参数"}
+                </Button>
+              </div>
+            </div>
+
+            {showPlannerAdvanced ? (
+              <div className="space-y-4 rounded-lg border p-4">
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  正在编辑<b>{plannerOverviewMode === "lean" ? "精简" : "完整"}</b>模式的数值。总字符预算是硬上限，
+                  各分区条数是上限值；实际进入窗口的条数还会受预算和分区轮询限制。修改保存后从下一轮规划开始生效。
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {PLANNER_LIMIT_FIELDS.map((field) => (
+                    <div key={field.key} className="space-y-1.5">
+                      <Label htmlFor={`planner-${field.key}`} className="text-xs font-normal text-muted-foreground">
+                        {field.label}
+                      </Label>
+                      <Input
+                        id={`planner-${field.key}`}
+                        type="number"
+                        min={field.min}
+                        max={field.max}
+                        step={field.step}
+                        value={plannerLimits[field.key]}
+                        disabled={!loaded || savingPlannerConfig}
+                        onChange={(e) => updatePlannerLimit(field.key, Number(e.target.value))}
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        范围 {field.min}–{field.max}；默认 {DEFAULT_PLANNER_OVERVIEW_CONFIG[plannerOverviewMode][field.key]}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button type="button" size="sm" onClick={savePlannerOverviewConfig} disabled={!loaded || savingPlannerConfig}>
+                    {savingPlannerConfig ? <Loader2Icon className="size-4 animate-spin" /> : null}
+                    保存数值
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={resetPlannerLimits} disabled={!loaded || savingPlannerConfig}>
+                    恢复当前模式默认
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={resetAllPlannerLimits} disabled={!loaded || savingPlannerConfig}>
+                    恢复全部默认
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 

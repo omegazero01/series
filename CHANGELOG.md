@@ -10,6 +10,8 @@
 
 - **Agent 发起的 curl/wget 默认携带浏览器 User-Agent**：此前 LLM 调用 curl 测试目标时 UA 是 `curl/x.x`，容易被最简单的指纹规则识别。现在 `<数据目录>/tool-http/` 下自动生成 `.curlrc` 与 `wgetrc`（默认为固定的桌面 Chrome UA），并通过 `CURL_HOME`/`WGETRC` 注入所有 Agent 的 Bash 会话——与是否开启流量捕获无关；模型显式传 `-A/--user-agent` 时仍以命令行为准。配置文件已存在则不覆盖，可手工修改自定义 UA；交互式 shell 会话同样生效。Python requests 等其它客户端不在本次范围。
 - **Planner 态势窗口新增精简模式（实验，默认关闭）**：设置页「实验功能」新增「Planner 态势窗口」，可选完整（默认）或精简。精简模式只向 Planner 预注入目标、完整 frontier、最近 8 条事实、3 条漏洞摘要、10 条提示和读取入口，预算约 10k 字符；完整血缘、较早事实/意图/漏洞和冷摘要正文仍可通过 `context_search` / `context_get` 按需读取。探索图、资产锚点、权限、审计与 UI 回放不变；切换在下一轮规划生效，无需重建 Agent。
+- **Planner 态势窗口支持自定义数值**：同一张设置卡新增「高级参数」，可分别调整完整/精简模式的事实、发现、目标、完成意图、提示、冷摘要条数和总字符预算；每项显示允许范围与默认值，支持恢复当前模式或全部默认。配置保存在 `settings.planner_overview_config`，每轮规划读取，下一轮生效；服务端校验上限，`open_intents`/`running_intents` 仍不截断。`SERIES_PLANNER_OVERVIEW` 环境变量存在时强制使用预设默认值，保证 TSecBench 等 A/B 评测不受 UI 配置影响。
+- **精简态势按当前方向/唤醒事件选择事实**：lean 模式不再只取最近 8 条，而是以最近事实为基线，额外按当前 `open/running` 意图和本轮 `done/finding` 触发召回直接产出的事实；按 trigger > frontier > recent 排序，同一意图最多 2 条，最终条数完全由 `planner_overview_config.lean.recent_facts` 决定（8/12/20 都是同一套逻辑，不写死）。候选事实沿用现有可见性过滤，查询失败保留最近事实；完整模式不变。可用 `SERIES_PLANNER_FACT_SELECTION=off` 关闭。
 
 ### 任务
 

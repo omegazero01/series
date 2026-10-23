@@ -1,5 +1,7 @@
 package agent
 
+import "sort"
+
 // leanGraphOverviewData is a pure, deliberately lossy projection of the
 // graph_overview snapshot used for the planner's per-round pre-injected
 // situation block. It never mutates the input and never widens authorization:
@@ -9,10 +11,17 @@ package agent
 // The exploration graph remains the source of truth. Anything omitted here is
 // still available through context_search / context_get under the existing task
 // scope.
-func leanGraphOverviewData(full map[string]any) map[string]any {
+func leanGraphOverviewData(full map[string]any, opts ...LeanOptions) map[string]any {
 	if full == nil {
 		return map[string]any{}
 	}
+	cfg := DefaultOverviewConfig().Lean
+	var focus *OverviewFocus
+	if len(opts) > 0 {
+		cfg = normalizeOverviewLimits(opts[0].Limits, cfg)
+		focus = opts[0].Focus
+	}
+	frontierIDs := overviewIDSet(full["open_intents"], full["running_intents"])
 	out := make(map[string]any, 18)
 	for _, key := range []string{
 		"task", "asset_approval_counts", "unavailable", "partial", "error",
@@ -30,7 +39,7 @@ func leanGraphOverviewData(full map[string]any) map[string]any {
 		}
 	}
 	if rows, ok := overviewRows(full["goals"]); ok {
-		out["goals"] = leanGoalRows(rows, 20)
+		out["goals"] = leanGoalRows(rows, cfg.Goals)
 	}
 	// Frontier is never truncated: dropping an open/running row makes the
 	// planner think a direction does not exist and duplicate work. Only fields
@@ -42,19 +51,19 @@ func leanGraphOverviewData(full map[string]any) map[string]any {
 		out["running_intents"] = leanIntentRows(rows, 0, false)
 	}
 	if rows, ok := overviewRows(full["recent_done_intents"]); ok {
-		out["recent_done_intents"] = leanIntentRows(rows, 5, true)
+		out["recent_done_intents"] = leanIntentRows(rows, cfg.RecentDoneIntents, true)
 	}
 	if rows, ok := overviewRows(full["recent_facts"]); ok {
-		out["recent_facts"] = leanFactRows(rows, 8)
+		out["recent_facts"] = leanFactRows(rows, cfg.RecentFacts, focus, frontierIDs)
 	}
 	if rows, ok := overviewRows(full["finding_list"]); ok {
-		out["finding_list"] = leanFindingRows(rows, 3)
+		out["finding_list"] = leanFindingRows(rows, cfg.Findings)
 	}
 	if rows, ok := overviewRows(full["hints"]); ok {
-		out["hints"] = leanHintRows(rows, 10)
+		out["hints"] = leanHintRows(rows, cfg.Hints)
 	}
 	if rows, ok := overviewRows(full["cold_digests"]); ok {
-		out["cold_digests"] = leanDigestRows(rows, 3)
+		out["cold_digests"] = leanDigestRows(rows, cfg.ColdDigests)
 	}
 	if cov, ok := full["coverage"].(map[string]any); ok {
 		out["coverage"] = leanCoverage(cov)
@@ -153,20 +162,127 @@ func leanIntentRows(rows []map[string]any, limit int, terminal bool) []map[strin
 	return out
 }
 
-func leanFactRows(rows []map[string]any, limit int) []map[string]any {
-	rows = capOverviewRows(rows, limit)
+func leanFactRows(rows []map[string]any, limit int, focus *OverviewFocus, frontierIDs map[int64]struct{}) []map[string]any {
+	if focus == nil || len(focus.TriggerIntentIDs) == 0 && len(frontierIDs) == 0 {
+		rows = capOverviewRows(rows, limit)
+		return leanFactMaps(rows)
+	}
+	triggerIDs := make(map[int64]struct{}, len(focus.TriggerIntentIDs))
+	for _, id := range focus.TriggerIntentIDs {
+		triggerIDs[id] = struct{}{}
+	}
+	type candidate struct {
+		row        map[string]any
+		index      int
+		score      int
+		primary    int64
+		confidence string
+	}
+	candidates := make([]candidate, 0, len(rows))
+	for i, row := range rows {
+		sources := factRowSources(row)
+		score := 0
+		primary := int64(0)
+		for _, source := range sources {
+			if _, ok := triggerIDs[source]; ok {
+				score = 2
+				primary = source
+				break
+			}
+			if _, ok := frontierIDs[source]; ok && score < 1 {
+				score = 1
+				primary = source
+			}
+		}
+		if primary == 0 && len(sources) > 0 {
+			primary = sources[0]
+		}
+		confidence, _ := row["confidence"].(string)
+		candidates = append(candidates, candidate{row: row, index: i, score: score, primary: primary, confidence: confidence})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
+		}
+		ci, cj := candidates[i].confidence, candidates[j].confidence
+		if ci != cj {
+			return ci == "observed"
+		}
+		return candidates[i].index < candidates[j].index
+	})
+	selected := make([]map[string]any, 0, min(limit, len(candidates)))
+	perIntent := make(map[int64]int)
+	for _, item := range candidates {
+		if len(selected) >= limit {
+			break
+		}
+		if item.primary > 0 && perIntent[item.primary] >= 2 {
+			continue
+		}
+		selected = append(selected, item.row)
+		if item.primary > 0 {
+			perIntent[item.primary]++
+		}
+	}
+	if len(selected) == 0 {
+		selected = capOverviewRows(rows, limit)
+	}
+	return leanFactMaps(selected)
+}
+
+// leanFactMaps projects the selected rows. `_sources` is an internal field from
+// candidate expansion and is never emitted to the planner.
+func leanFactMaps(rows []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		m := map[string]any{
 			"id":      row["id"],
 			"summary": leanText(row["summary"], 300),
 		}
-		for _, key := range []string{"from_intent", "confidence"} {
-			if v, ok := row[key]; ok {
-				m[key] = v
-			}
+		if v, ok := row["from_intent"]; ok {
+			m["from_intent"] = v
+		}
+		if v, ok := row["confidence"]; ok {
+			m["confidence"] = v
 		}
 		out = append(out, m)
+	}
+	return out
+}
+
+func factRowSources(row map[string]any) []int64 {
+	if raw, ok := row["_sources"]; ok {
+		switch v := raw.(type) {
+		case []int64:
+			return v
+		case []any:
+			out := make([]int64, 0, len(v))
+			for _, item := range v {
+				if id, ok := structuredInt64(item); ok {
+					out = append(out, id)
+				}
+			}
+			return out
+		}
+	}
+	if id, ok := structuredInt64(row["from_intent"]); ok {
+		return []int64{id}
+	}
+	return nil
+}
+
+func overviewIDSet(groups ...any) map[int64]struct{} {
+	out := map[int64]struct{}{}
+	for _, group := range groups {
+		rows, ok := overviewRows(group)
+		if !ok {
+			continue
+		}
+		for _, row := range rows {
+			if id, ok := structuredInt64(row["id"]); ok {
+				out[id] = struct{}{}
+			}
+		}
 	}
 	return out
 }

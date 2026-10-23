@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -40,6 +41,7 @@ type Planner struct {
 	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 	overviewProfileFn func() OverviewProfile                 // resolver: full/lean situation projection (nil = full)
+	overviewConfigFn  func() OverviewConfig                  // resolver: editable per-profile limits (nil = defaults)
 	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
@@ -73,6 +75,18 @@ func (p *Planner) overviewProfile() OverviewProfile {
 		return OverviewLean
 	}
 	return OverviewFull
+}
+
+// SetOverviewConfig wires the editable full/lean projection limits. Like the
+// mode resolver, it is read once per planning round so a settings change takes
+// effect on the next wake-up without rebuilding the planner.
+func (p *Planner) SetOverviewConfig(fn func() OverviewConfig) { p.overviewConfigFn = fn }
+
+func (p *Planner) overviewConfig() OverviewConfig {
+	if p.overviewConfigFn == nil {
+		return DefaultOverviewConfig()
+	}
+	return p.overviewConfigFn().Normalize()
 }
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
@@ -308,27 +322,72 @@ func truncOutput(s string, n int) string {
 // OverviewLean is a narrower agent-facing projection: the graph itself is
 // unchanged, but the planner receives only the goal, frontier, recent facts,
 // active hints and section read pointers. Full remains the default.
-func renderGraphOverview(data map[string]any, profile OverviewProfile) string {
+func renderGraphOverview(data map[string]any, profile OverviewProfile, opts ...OverviewRenderOptions) string {
 	const prefix = "\n\n【本轮态势：有界窗口，未展示不代表不存在；sections 提供遗漏状态和读取入口】：\n<graph_overview>\n"
 	const suffix = "\n</graph_overview>"
+	var options OverviewRenderOptions
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	config := options.Config.Normalize()
+	limits := config.LimitsFor(profile)
 	source := data
-	budget := plannerOverviewRunes
+	budget := limits.BudgetRunes
 	if profile == OverviewLean {
-		source = leanGraphOverviewData(data)
-		budget = plannerLeanOverviewRunes
+		source = leanGraphOverviewData(data, LeanOptions{Limits: limits, Focus: options.Focus})
+	} else {
+		source = trimGraphOverviewData(data, limits)
 	}
 	view := boundedGraphOverview(source, budget-len([]rune(prefix+suffix)), 0)
 	// If the lean projection cannot even fit its metadata, fall back to the
-	// full window for this round rather than handing the planner an empty
-	// situation. The next round retries lean.
+	// unexpanded base window for this round rather than handing the planner an
+	// empty situation. The next round retries lean.
 	if profile == OverviewLean && view["context_unavailable"] == true {
-		view = boundedGraphOverview(data, plannerOverviewRunes-len([]rune(prefix+suffix)), 0)
+		fallback := data
+		if options.Base != nil {
+			fallback = options.Base
+		}
+		fullLimits := config.Full
+		view = boundedGraphOverview(trimGraphOverviewData(fallback, fullLimits), fullLimits.BudgetRunes-len([]rune(prefix+suffix)), 0)
 	}
 	body, _ := json.Marshal(view)
 	return prefix + string(body) + suffix
 }
 
 const leanOverviewGuidance = "\n\n【本轮态势模式：lean】\n本轮只预注入目标、frontier、最近事实、active hints 和计数。未展示的 facts/findings/历史意图不代表不存在。信息不足时先用 context_search / context_get 查询，再判断目标或派意图；不要凭概览摘要猜测完整证据。"
+
+// factSelectionEnabled defaults to on for the lean experiment; an operator can
+// disable it with SERIES_PLANNER_FACT_SELECTION=off for a clean A/B baseline.
+func factSelectionEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SERIES_PLANNER_FACT_SELECTION"))) {
+	case "off", "false", "0", "no":
+		return false
+	default:
+		return true
+	}
+}
+
+// positiveTriggerIntentIDs only treats new information (done/finding) as a
+// positive focus. A cancelled direction must not pull its old facts back into
+// the window; goal/hint/finding_deleted events have no intent focus.
+func positiveTriggerIntentIDs(triggers []TriggerEvent) []int64 {
+	seen := map[int64]struct{}{}
+	out := make([]int64, 0, len(triggers))
+	for _, ev := range triggers {
+		if ev.IntentID <= 0 {
+			continue
+		}
+		if ev.Kind != "done" && ev.Kind != "finding" {
+			continue
+		}
+		if _, ok := seen[ev.IntentID]; ok {
+			continue
+		}
+		seen[ev.IntentID] = struct{}{}
+		out = append(out, ev.IntentID)
+	}
+	return out
+}
 
 // plannerDefaultTmpl is the built-in EDITABLE body (段 [A]) of the planner prompt,
 // seeded into agent_prompts. Goal is a {{.Goal}} template var; the 中间产物输出规约
@@ -469,7 +528,20 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 		}
 	}
 	profile := p.overviewProfile()
-	situational := cancelled + renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData(), profile)
+	config := p.overviewConfig()
+	overviewBase := tsx.graphOverviewData()
+	overview := overviewBase
+	var focus *OverviewFocus
+	if profile == OverviewLean && factSelectionEnabled() {
+		f := OverviewFocus{TriggerIntentIDs: positiveTriggerIntentIDs(triggers)}
+		focus = &f
+		overview = tsx.expandOverviewFacts(overviewBase, *focus, config.LimitsFor(profile))
+	}
+	situational := cancelled + renderTriggers(ts, triggers) + renderGraphOverview(overview, profile, OverviewRenderOptions{
+		Config: config,
+		Focus:  focus,
+		Base:   overviewBase,
+	})
 	if profile == OverviewLean {
 		situational += leanOverviewGuidance
 	}

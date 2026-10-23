@@ -582,6 +582,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetMaxTokens(plannerRuntime.maxTokens)
 	pl.SetNoaEnabled(s.m.NoaCompactionEnabled)      // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	pl.SetOverviewProfile(s.plannerOverviewProfile) // 实验功能:Planner 态势窗口 full/lean(每轮读)
+	pl.SetOverviewConfig(s.plannerOverviewConfig)   // 实验功能:可编辑的完整/精简数值(每轮读)
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)
 	pl.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())

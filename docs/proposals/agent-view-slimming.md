@@ -343,6 +343,8 @@ planner_context_search_calls, planner_context_get_calls
 
 前面的 10k、8 facts、3 findings、10 hints 等不是从某组真实任务测量出来的“最优值”，而是分三类：
 
+> 2026-10-22 更新：这些数值现已作为 `planner_overview_config` 暴露到系统设置，完整/精简两套预设均可单独调整；默认值保持本文档记录的值不变。
+
 ### 5.9.1 第一类：代码现状（硬依据）
 
 这些值来自当前实现，不是拍脑袋：

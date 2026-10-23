@@ -965,6 +965,21 @@ export interface TrafficHost {
 }
 
 // ---- App settings (runtime toggles) ----
+export interface PlannerOverviewLimits {
+  budget_runes: number;
+  goals: number;
+  recent_facts: number;
+  findings: number;
+  recent_done_intents: number;
+  hints: number;
+  cold_digests: number;
+}
+
+export interface PlannerOverviewConfig {
+  full: PlannerOverviewLimits;
+  lean: PlannerOverviewLimits;
+}
+
 export interface Settings {
   traffic_capture: boolean;
   agent_traffic_binding: boolean; // Agent 自动绑定流量证据，默认关闭；不影响人工绑定
@@ -1022,6 +1037,8 @@ export interface Settings {
   // 实验功能:Planner 每轮预注入的态势窗口(默认 full)。lean 只注入目标、frontier、
   // 最近事实和读取入口,细节由 Planner 按需检索。
   planner_overview_mode?: "full" | "lean";
+  // 完整/精简两套可编辑数值；缺省字段由服务端回退到内置默认值。
+  planner_overview_config?: PlannerOverviewConfig;
 }
 
 export interface SmartProxyHost {

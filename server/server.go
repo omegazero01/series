@@ -459,6 +459,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetMaxTokens(maxTokensResolver(pCfg))          // 单次回复输出上限(0 = 不发)
 	pl.SetNoaEnabled(s.m.NoaCompactionEnabled)        // 实验功能:noa 上下文压缩(每 run 读)
 	pl.SetOverviewProfile(s.plannerOverviewProfile)   // 实验功能:Planner 态势窗口 full/lean(每轮读)
+	pl.SetOverviewConfig(s.plannerOverviewConfig)     // 实验功能:可编辑的完整/精简数值(每轮读)
 	// cold-digest §7: background cold-node compaction, on the planner's provider/
 	// model (§4 uses the running agent's model). Uses Complete (non-streaming) for
 	// the one-shot body summarization.
@@ -489,6 +490,12 @@ func (s *Server) plannerOverviewProfile() agent.OverviewProfile {
 		return agent.OverviewLean
 	}
 	return agent.OverviewFull
+}
+
+// plannerOverviewConfig is the editable numerical companion to the profile
+// resolver. Read per planning round; env-locked benchmark runs get defaults.
+func (s *Server) plannerOverviewConfig() agent.OverviewConfig {
+	return s.m.PlannerOverviewConfig()
 }
 
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
@@ -3531,7 +3538,8 @@ func (s *Server) settingsPayload() map[string]any {
 		"noa_compaction": s.m.NoaCompactionEnabled(),
 		// 实验功能:Planner 态势窗口 full/lean(默认 full)。仅影响 Planner 每轮预注入
 		// 的 graph_overview 投影;图/权限/审计/UI 不变。
-		"planner_overview_mode": s.m.PlannerOverviewMode(),
+		"planner_overview_mode":   s.m.PlannerOverviewMode(),
+		"planner_overview_config": s.m.PlannerOverviewConfig(),
 	}
 }
 
@@ -3588,6 +3596,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		NoaCompaction *bool `json:"noa_compaction"`
 		// 实验功能:Planner 态势窗口 full/lean(默认 full);每轮读,无需重建 agent。
 		PlannerOverviewMode *string `json:"planner_overview_mode"`
+		// Planner 态势窗口的完整/精简数值；每轮读，无需重建 agent。
+		PlannerOverviewConfig *agent.OverviewConfig `json:"planner_overview_config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3623,6 +3633,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if req.PlannerOverviewMode != nil {
 		// Planner 每轮读取该设置,切换在下一轮规划生效,无需 applyLLM 重建。
 		if err := s.m.SetPlannerOverviewMode(*req.PlannerOverviewMode); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	if req.PlannerOverviewConfig != nil {
+		// 每轮读取；保存后下一轮生效，无需 applyLLM 重建。
+		if err := s.m.SetPlannerOverviewConfig(*req.PlannerOverviewConfig); err != nil {
 			writeErr(w, 400, err.Error())
 			return
 		}
