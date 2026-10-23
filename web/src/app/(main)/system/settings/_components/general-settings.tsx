@@ -56,17 +56,67 @@ type PlannerLimitKey = keyof PlannerOverviewLimits;
 const PLANNER_LIMIT_FIELDS: Array<{
   key: PlannerLimitKey;
   label: string;
+  description: string;
   min: number;
   max: number;
   step: number;
 }> = [
-  { key: "budget_runes", label: "总字符预算", min: 2000, max: 48000, step: 500 },
-  { key: "goals", label: "目标条数", min: 1, max: 100, step: 1 },
-  { key: "recent_facts", label: "最近事实条数", min: 1, max: 20, step: 1 },
-  { key: "findings", label: "发现条数", min: 1, max: 10, step: 1 },
-  { key: "recent_done_intents", label: "最近完成意图", min: 1, max: 12, step: 1 },
-  { key: "hints", label: "提示条数", min: 1, max: 50, step: 1 },
-  { key: "cold_digests", label: "冷摘要条数", min: 1, max: 15, step: 1 },
+  {
+    key: "budget_runes",
+    label: "总字符预算",
+    description: "所有分区合计的硬上限，不是单个分区的预算。",
+    min: 2000,
+    max: 48000,
+    step: 500,
+  },
+  {
+    key: "goals",
+    label: "目标条数",
+    description: "目标条件最多显示几条。",
+    min: 1,
+    max: 100,
+    step: 1,
+  },
+  {
+    key: "recent_facts",
+    label: "事实展示条数",
+    description: "最终展示的事实条数；精简模式会从最近事实和当前方向/触发相关事实中选，不只是最近。",
+    min: 1,
+    max: 20,
+    step: 1,
+  },
+  {
+    key: "findings",
+    label: "漏洞记录（发现）条数",
+    description: "对应 finding_list，只显示已确认漏洞；不是 fact 事实。",
+    min: 1,
+    max: 10,
+    step: 1,
+  },
+  {
+    key: "recent_done_intents",
+    label: "最近完成意图条数",
+    description: "最近结束的意图，按时间倒序保留。",
+    min: 1,
+    max: 12,
+    step: 1,
+  },
+  {
+    key: "hints",
+    label: "活跃提示条数",
+    description: "只统计 active 提示；已消费提示不会进入窗口。",
+    min: 1,
+    max: 50,
+    step: 1,
+  },
+  {
+    key: "cold_digests",
+    label: "冷摘要条数",
+    description: "旧任务的冷摘要条数。",
+    min: 1,
+    max: 15,
+    step: 1,
+  },
 ];
 
 function mergePlannerLimits(base: PlannerOverviewLimits, value?: Partial<PlannerOverviewLimits>): PlannerOverviewLimits {
@@ -889,6 +939,13 @@ export default function SystemSettingsPage() {
               控制 Planner 每轮预注入的探索图摘要，默认<b>完整</b>。<b>精简</b>
               只注入目标、当前待办/运行方向、最近事实和读取入口，细节由 Planner 按需检索。两种模式的条数和字符预算可在
               <b>高级参数</b>中调整；探索图、权限、审计和 UI 回放不受影响。切换/保存数值在下一轮规划生效，无需重建 Agent。
+              <span className="mt-2 block">
+                精简模式还会对事实做优先级选择：本轮触发（本轮唤醒事件，
+                <code>done</code>/<code>finding</code>，即完成/发现）直接产出的事实记 <b>2</b> 分，
+                当前未完成/执行中方向（frontier）产出的事实记 <b>1</b> 分，其他最近事实记 <b>0</b> 分。
+                同分时实际观察到的（<code>confidence=observed</code>）优先；同一个意图最多保留 2 条。
+                完整模式不做这层选择，仍按输入顺序截断。
+              </span>
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -944,6 +1001,9 @@ export default function SystemSettingsPage() {
                         disabled={!loaded || savingPlannerConfig}
                         onChange={(e) => updatePlannerLimit(field.key, Number(e.target.value))}
                       />
+                      <p className="text-[11px] text-muted-foreground">
+                        {field.description}
+                      </p>
                       <p className="text-[11px] text-muted-foreground">
                         范围 {field.min}–{field.max}；默认 {DEFAULT_PLANNER_OVERVIEW_CONFIG[plannerOverviewMode][field.key]}
                       </p>
