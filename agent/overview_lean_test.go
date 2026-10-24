@@ -171,7 +171,7 @@ func TestRenderGraphOverviewLeanBudgetAndSections(t *testing.T) {
 	full := leanFixtureFull()
 	full["goals"] = full["goals"].([]map[string]any)[:5]
 	full["open_intents"] = full["open_intents"].([]map[string]any)[:8]
-	rendered := renderGraphOverview(full, OverviewLean)
+	rendered := renderPlannerOverview(full, OverviewLean)
 	t.Logf("lean render runes=%d source_open=%d", utf8.RuneCountInString(rendered), len(leanGraphOverviewData(full)["open_intents"].([]map[string]any)))
 	if runes := utf8.RuneCountInString(rendered); runes > plannerLeanOverviewRunes {
 		t.Fatalf("lean render=%d runes, want <= %d", runes, plannerLeanOverviewRunes)
@@ -475,7 +475,7 @@ func TestRenderGraphOverviewUsesCustomLimits(t *testing.T) {
 	cfg := DefaultOverviewConfig()
 	cfg.Lean.RecentFacts = 2
 	cfg.Lean.Findings = 1
-	rendered := renderGraphOverview(full, OverviewLean, OverviewRenderOptions{Config: cfg})
+	rendered := renderPlannerOverview(full, OverviewLean, OverviewRenderOptions{Config: cfg})
 	start := strings.Index(rendered, "<graph_overview>")
 	end := strings.Index(rendered, "</graph_overview>")
 	if start < 0 || end <= start {
