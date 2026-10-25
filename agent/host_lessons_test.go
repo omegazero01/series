@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,6 +20,7 @@ func TestRecordHostLessonDedupesAndCounts(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		RecordHostLesson("Bash", []byte(`{"command":"cd x && dir"}`), []byte("ParserError: The token '&&' is not a valid statement separator in this version."))
 	}
+	FlushHostLessons()
 	lessons, err := loadHostLessons(path)
 	if err != nil {
 		t.Fatal(err)
@@ -121,5 +123,23 @@ func TestAssetSearchDescriptionCarriesHostLessons(t *testing.T) {
 	desc := (&ToolSet{}).assetSearch().Description()
 	if !strings.Contains(desc, "本机经验") || !strings.Contains(desc, "Select-Object -First") {
 		t.Fatalf("asset_search description missing the host-lesson note:\n%s", desc)
+	}
+}
+
+func TestHostLessonsDebounceDoesNotWriteEveryError(t *testing.T) {
+	path := configureLessonTest(t)
+	for i := 0; i < 5; i++ {
+		RecordHostLesson("Bash", nil, []byte("head : The term 'head' is not recognized as the name of a cmdlet"))
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("lessons file should not exist before the debounce flush")
+	}
+	FlushHostLessons()
+	lessons, err := loadHostLessons(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lessons) != 1 || lessons[0].Count != 5 {
+		t.Fatalf("flush should carry the buffered count: %#v", lessons)
 	}
 }

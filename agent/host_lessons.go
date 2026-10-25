@@ -42,9 +42,21 @@ var (
 	hostLessonWriteMu sync.Mutex
 )
 
+// hostLessonBuf debounces disk writes: errors often arrive in bursts (a retry
+// loop can produce dozens), and one atomic rename per error is wasted IO.
+const hostLessonFlushDelay = 2 * time.Second
+
+var hostLessonBuf struct {
+	mu      sync.Mutex
+	pending map[string]hostLesson
+	timer   *time.Timer
+}
+
 // ConfigureHostLessons points the recorder and the tool-description note at a
 // JSON file (normally <data>/host/lessons.json). An empty path disables both.
+// Pending debounced counts are flushed to the previous path first.
 func ConfigureHostLessons(path string) {
+	FlushHostLessons()
 	hostLessonPathMu.Lock()
 	hostLessonPath = strings.TrimSpace(path)
 	hostLessonPathMu.Unlock()
@@ -65,7 +77,13 @@ func HostLessonNote() string {
 		return ""
 	}
 	lessons, err := loadHostLessons(path)
-	if err != nil || len(lessons) == 0 {
+	if err != nil {
+		lessons = nil
+	}
+	// Overlay not-yet-flushed counts so a build right after a burst of errors
+	// still sees the current numbers.
+	lessons = mergeHostLessonLists(lessons, snapshotHostLessonPending())
+	if len(lessons) == 0 {
 		return ""
 	}
 	sort.SliceStable(lessons, func(i, j int) bool {
@@ -95,39 +113,48 @@ func HostLessonNote() string {
 }
 
 // RecordHostLesson classifies one failed tool call and merges it into the lesson
-// store. It is best-effort: callers ignore the returned error.
+// store. It is best-effort and intentionally does not touch the disk: counts are
+// buffered in memory and flushed at most once per hostLessonFlushDelay, so a
+// retry loop cannot turn into one atomic write per error.
 func RecordHostLesson(tool string, input, result []byte) {
-	path := currentHostLessonPath()
-	if path == "" {
+	if currentHostLessonPath() == "" {
 		return
 	}
 	lesson, ok := classifyHostLesson(tool, input, result)
 	if !ok {
 		return
 	}
+	now := time.Now().UTC()
+	hostLessonBuf.mu.Lock()
+	if hostLessonBuf.pending == nil {
+		hostLessonBuf.pending = map[string]hostLesson{}
+	}
+	mergeHostLessonInto(hostLessonBuf.pending, lesson, now)
+	if hostLessonBuf.timer == nil {
+		hostLessonBuf.timer = time.AfterFunc(hostLessonFlushDelay, FlushHostLessons)
+	}
+	hostLessonBuf.mu.Unlock()
+}
+
+// FlushHostLessons writes buffered counts to disk. It is safe to call with no
+// pending lessons and is called by ConfigureHostLessons and the debounce timer.
+func FlushHostLessons() {
+	hostLessonBuf.mu.Lock()
+	pending := hostLessonBuf.pending
+	hostLessonBuf.pending = nil
+	if hostLessonBuf.timer != nil {
+		hostLessonBuf.timer.Stop()
+		hostLessonBuf.timer = nil
+	}
+	hostLessonBuf.mu.Unlock()
+	path := currentHostLessonPath()
+	if path == "" || len(pending) == 0 {
+		return
+	}
 	hostLessonWriteMu.Lock()
 	defer hostLessonWriteMu.Unlock()
 	lessons, _ := loadHostLessons(path)
-	now := time.Now().UTC()
-	found := false
-	for i := range lessons {
-		if lessons[i].Signature != lesson.Signature {
-			continue
-		}
-		lessons[i].Count++
-		lessons[i].LastSeen = now
-		if lesson.Hint != "" {
-			lessons[i].Hint = lesson.Hint
-		}
-		found = true
-		break
-	}
-	if !found {
-		lesson.Count = 1
-		lesson.FirstSeen = now
-		lesson.LastSeen = now
-		lessons = append(lessons, lesson)
-	}
+	lessons = mergeHostLessonLists(lessons, mapValues(pending))
 	if len(lessons) > hostLessonMaxItems {
 		sort.SliceStable(lessons, func(i, j int) bool {
 			if lessons[i].Count != lessons[j].Count {
@@ -138,6 +165,63 @@ func RecordHostLesson(tool string, input, result []byte) {
 		lessons = lessons[:hostLessonMaxItems]
 	}
 	_ = saveHostLessons(path, lessons)
+}
+
+func snapshotHostLessonPending() []hostLesson {
+	hostLessonBuf.mu.Lock()
+	defer hostLessonBuf.mu.Unlock()
+	return mapValues(hostLessonBuf.pending)
+}
+
+func mapValues(m map[string]hostLesson) []hostLesson {
+	out := make([]hostLesson, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
+}
+
+func mergeHostLessonInto(pending map[string]hostLesson, lesson hostLesson, now time.Time) {
+	if existing, ok := pending[lesson.Signature]; ok {
+		existing.Count++
+		existing.LastSeen = now
+		if lesson.Hint != "" {
+			existing.Hint = lesson.Hint
+		}
+		pending[lesson.Signature] = existing
+		return
+	}
+	lesson.Count = 1
+	lesson.FirstSeen = now
+	lesson.LastSeen = now
+	pending[lesson.Signature] = lesson
+}
+
+// mergeHostLessonLists folds pending counts into the on-disk list without
+// modifying either input; used by both the flush path and the note overlay.
+func mergeHostLessonLists(base, pending []hostLesson) []hostLesson {
+	out := append([]hostLesson(nil), base...)
+	for _, p := range pending {
+		found := false
+		for i := range out {
+			if out[i].Signature != p.Signature {
+				continue
+			}
+			out[i].Count += p.Count
+			if p.LastSeen.After(out[i].LastSeen) {
+				out[i].LastSeen = p.LastSeen
+			}
+			if p.Hint != "" {
+				out[i].Hint = p.Hint
+			}
+			found = true
+			break
+		}
+		if !found {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func loadHostLessons(path string) ([]hostLesson, error) {

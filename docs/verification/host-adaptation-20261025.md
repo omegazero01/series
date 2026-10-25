@@ -99,9 +99,9 @@ norma `memory.slug()` 的规则是 `[^a-z0-9]+ → -` 再去首尾 `-`。纯中�
   - `ListMemories`：列出记忆目录（名称、类型、描述、保存时间），支持中文子串过滤，中文标题无需分词即可看到。
   - `SearchMemories`：英文按 `[a-z0-9_]{2,}` 词、中文按双字滑窗（bigram）检索，返回最相关记忆正文；解决 norma `RecallMemory` 纯中文查询 0 token 召回为空的问题。
   - `ReadMemory`：按名称/slug 读取正文；`Read()` 返回结果与请求名不符时（纯中文名空 slug 导致读到 `.md`）回退全目录扫描，未命中时给相近候选。
-  - `SaveMemory`：纯中文名使用 `memory-<sha1前4字节>` 文件名，同名视为更新，不同名同 slug 追加哈希后缀；写完后按 SDK 相同格式重建 `MEMORY.md`。
-- `agent/worker.go`：worker 绑定上述 4 个工具；系统提示追加一段记忆使用说明（先看目录、命中先读、本机/工具坑解决后用 `SaveMemory` 记录）。
-- `agent/memory_tools_test.go`（新增）：中文子串目录过滤、中英文分词、纯中文检索命中、纯中文标题读取回退、两个纯中文名不同文件不覆盖、同名更新、MEMORY.md 重建、4 个工具名。
+  - `RecordMemory`（安全实现，沿用 SDK 工具名）：纯中文名使用 `memory-<sha1前4字节>` 文件名，同名视为更新，不同名同 slug 追加哈希后缀；写完后按 SDK 相同格式重建 `MEMORY.md`。SDK 自带的 `RecordMemory` 不再挂载。
+- `agent/worker.go`：worker 绑定上述 5 个工具（`ListMemories`/`ReadMemory`/`SearchMemories`/`RecallMemory`/`RecordMemory`）；系统提示追加一段记忆使用说明（先看目录、命中先读、本机/工具坑解决后用 `RecordMemory` 记录）。
+- `agent/memory_tools_test.go`（新增）：中文子串目录过滤、中英文分词、纯中文检索命中、纯中文标题读取回退、两个纯中文名不同文件不覆盖、同名更新、MEMORY.md 重建、5 个工具名。
 
 ### 验证输出
 
@@ -149,9 +149,33 @@ $ go build ./...
 exit 0
 ```
 
+## 阶段 3c：pinned 常驻注入、RecordMemory 彻底替换、经验写入去抖（同一分支追加）
+
+### 改动
+
+- **Pinned 常驻注入**：`pinned: true` frontmatter、`type=feedback`、名称以 `host-` 开头的记忆视为常驻；worker 每次 run 的系统提示固定注入一份“常驻记忆”清单（名称 + 一句话描述，最多 8 条 / 900 字符），完整正文仍按需 `ReadMemory`/`RecallMemory`。另按当前意图文本用中英文分词召回最多 3 条相关记忆注入，pinned 不重复出现。没有默认注入全量 `MEMORY.md`（约 4.5k token），目录发现交给 `ListMemories`。
+- **彻底替换 SDK 记忆工具**：worker 不再设置 `agentcore.MemoryOptions`；改用 SERIES 自己的 `RecallMemory`/`RecordMemory`（与 SDK 同名，但写文件用名称哈希文件名，纯中文名不再互相覆盖）+ `ListMemories`/`ReadMemory`/`SearchMemories`。用户原来记录的 `RecordMemory` 习惯仍然有效，只是落盘实现变安全了；`SaveMemory` 名称移除。
+- **经验写入去抖**：`host/lessons.json` 不再每条错误写一次；`RecordHostLesson` 只更新内存计数，最多每 2 秒批量落盘一次，`HostLessonNote()` 会把未落盘的计数覆盖进展示；`FlushHostLessons()` 可手动强制落盘，`ConfigureHostLessons` 切换路径前自动 flush。
+
+### 验证输出
+
+```text
+$ go test ./agent -run 'TestMemory|TestHostPinned|TestMemoryRelevant|TestMemoryPinned|TestRecordMemory|TestHostLessonsDebounce'
+--- PASS: TestHostPinnedNoteIncludesFeedbackAndExplicitPinned
+--- PASS: TestMemoryRelevantNoteSkipsPinnedMemories
+--- PASS: TestMemoryPinnedFrontmatterRoundTrip
+--- PASS: TestHostLessonsDebounceDoesNotWriteEveryError
+--- PASS: TestMemoryCatalogToolsExposeReadAndSaveTools
+ok  github.com/neouks/series/agent
+
+$ go build ./...
+exit 0
+```
+
 ## 未验证 / 待办
 
 - 未跑真实任务端到端验证；只验证了编译、单测和真实本机探测。错误率对比需要拿真实任务前后各一批 transcript 统计。
 - 未重新构建/替换 `series.exe`；也未启动或重启 SERIES（用户运行中的实例未受影响）。
-- 记忆系统剩余：pinned 索引/常驻注入；norma `RecordMemory` 仍会覆盖纯中文名，需要模型改用 `SaveMemory` 或后续修 SDK slug；`host/lessons.json` 目前每次报错都做一次原子写，后续可按签名加内存去抖。
+- 现有存量纯中文名记忆如果之前已经被 SDK 覆盖，只能看到覆盖后的那一份；本分支只保证新写入不再覆盖。
+- 常驻注入给的是名称+描述，不注入全文；如果希望常驻记忆正文也每次可见，需要单独开设置项并评估 token。
 - 本机首次工具装配时会执行两次 PowerShell 只读探测（版本 + 别名），有 3 秒超时保护；探测结果进程内缓存。

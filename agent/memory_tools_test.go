@@ -108,10 +108,10 @@ func TestFindMemoryFallsBackToChineseTitle(t *testing.T) {
 func TestMemoryCatalogToolsExposeReadAndSaveTools(t *testing.T) {
 	store := seedMemoryTestStore(t)
 	tools := memoryCatalogTools(store)
-	if len(tools) != 4 {
-		t.Fatalf("tools = %d, want 4", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("tools = %d, want 5", len(tools))
 	}
-	want := map[string]bool{"ListMemories": true, "ReadMemory": true, "SearchMemories": true, "SaveMemory": true}
+	want := map[string]bool{"ListMemories": true, "ReadMemory": true, "SearchMemories": true, "RecallMemory": true, "RecordMemory": true}
 	for _, tool := range tools {
 		if !want[tool.Name()] {
 			t.Fatalf("unexpected tool %s", tool.Name())
@@ -126,11 +126,11 @@ func TestSaveMemoryFileKeepsChineseNamesDistinct(t *testing.T) {
 	store := memory.NewStore(t.TempDir())
 	first := memory.Memory{Name: "纯中文记忆甲", Type: memory.TypeReference, Description: "甲", Content: "内容甲"}
 	second := memory.Memory{Name: "纯中文记忆乙", Type: memory.TypeReference, Description: "乙", Content: "内容乙"}
-	pathA, err := saveMemoryFile(store, first)
+	pathA, err := saveMemoryFile(store, first, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pathB, err := saveMemoryFile(store, second)
+	pathB, err := saveMemoryFile(store, second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestSaveMemoryFileKeepsChineseNamesDistinct(t *testing.T) {
 	// Same name writes/updates in place instead of creating a second file.
 	updated := first
 	updated.Content = "内容甲已更新"
-	pathA2, err := saveMemoryFile(store, updated)
+	pathA2, err := saveMemoryFile(store, updated, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,5 +172,55 @@ func TestSaveMemoryFileKeepsChineseNamesDistinct(t *testing.T) {
 		if !strings.Contains(string(idx), name) {
 			t.Fatalf("MEMORY.md missing %q:\n%s", name, idx)
 		}
+	}
+}
+
+func TestHostPinnedNoteIncludesFeedbackAndExplicitPinned(t *testing.T) {
+	store := seedMemoryTestStore(t)
+	// seed store already has two type=feedback memories -> auto-pinned.
+	if _, err := saveMemoryFile(store, memory.Memory{
+		Name: "普通标题但显式常驻", Type: memory.TypeReference, Description: "pinned 测试", Content: "每轮都要看到我",
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	note := HostPinnedNote(store)
+	if !strings.Contains(note, "host-windows-powershell-quirks") {
+		t.Fatalf("feedback memory should be pinned:\n%s", note)
+	}
+	if !strings.Contains(note, "普通标题但显式常驻") {
+		t.Fatalf("explicit pinned memory missing:\n%s", note)
+	}
+	if strings.Contains(note, "内部系统登录接口排查记录") {
+		t.Fatalf("non-pinned reference memory should not be in the pinned note:\n%s", note)
+	}
+}
+
+func TestMemoryRelevantNoteSkipsPinnedMemories(t *testing.T) {
+	store := seedMemoryTestStore(t)
+	note := memoryRelevantNote(store, "登录接口还有什么没测", 3)
+	if !strings.Contains(note, "内部系统登录接口排查记录") {
+		t.Fatalf("relevant Chinese memory missing:\n%s", note)
+	}
+	if strings.Contains(note, "host-windows-powershell-quirks") {
+		t.Fatalf("pinned memory should not be duplicated in the relevant note:\n%s", note)
+	}
+	if got := memoryRelevantNote(store, "", 3); got != "" {
+		t.Fatalf("empty query should not inject: %q", got)
+	}
+}
+
+func TestMemoryPinnedFrontmatterRoundTrip(t *testing.T) {
+	store := memory.NewStore(t.TempDir())
+	m := memory.Memory{Name: "host-proxy-quirks", Type: memory.TypeReference, Description: "direct egress", Content: "proxy notes"}
+	path, err := saveMemoryFile(store, m, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, pinned, err := readMemoryAt(path)
+	if err != nil || !pinned {
+		t.Fatalf("pinned round-trip failed: pinned=%v err=%v", pinned, err)
+	}
+	if got.Name != m.Name || strings.TrimSpace(got.Content) != strings.TrimSpace(m.Content) {
+		t.Fatalf("content round-trip failed: %#v", got)
 	}
 }

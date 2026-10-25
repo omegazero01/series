@@ -23,17 +23,25 @@ import (
 // the model almost never reached for them on its own: a short usage hint plus a
 // record-your-own-hiccup instruction is the cheapest way to turn the store into
 // something that actually gets read.
-const memoryUsageHint = "\n\n【长期记忆】可用 ListMemories 查看记忆目录（中文标题也能直接看到）、SearchMemories 做中英文检索、ReadMemory 按名称读取正文；动手前先看目录，命中相关经验先读取。遇到可复用的本机/工具坑并解决后，用 SaveMemory 写一条（名称可用中文；含接口名、参数名等英文锚点更利于以后召回）。"
+const memoryUsageHint = "\n\n【长期记忆】可用 ListMemories 查看记忆目录（中文标题也能直接看到）、SearchMemories 做中英文检索、ReadMemory 按名称读取正文、RecallMemory 按相关性回忆；动手前先看目录，命中相关经验先读取。遇到可复用的本机/工具坑并解决后，用 RecordMemory 写一条（名称可用中文；含接口名、参数名等英文锚点更利于以后召回）；标 pinned:true（或 type=feedback / 名称以 host- 开头）的记忆会作为常驻记忆每次注入。"
 
 // memoryCatalogTools exposes the memory directory to the worker. norma already
-// ships RecallMemory/RecordMemory, but retrieval there is English-token only and
-// the MEMORY.md index is not injected; these tools close that gap without
-// forking the SDK.
+// ships RecallMemory/RecordMemory, but retrieval there is English-token only,
+// MEMORY.md is not injected, and RecordMemory's slug() collapses pure-Chinese
+// names onto the same file. These tools replace that surface without forking
+// the SDK: RecallMemory/RecordMemory keep the familiar names, List/Read/Search
+// add directory browsing and Chinese matching.
 func memoryCatalogTools(store *memory.Store) []actool.CoreTool {
 	if store == nil {
 		return nil
 	}
-	return []actool.CoreTool{listMemoriesTool(store), readMemoryTool(store), searchMemoriesTool(store), saveMemoryTool(store)}
+	return []actool.CoreTool{
+		listMemoriesTool(store),
+		readMemoryTool(store),
+		searchMemoriesTool(store),
+		recallMemoryTool(store),
+		recordMemoryTool(store),
+	}
 }
 
 func listMemoriesTool(store *memory.Store) actool.CoreTool {
@@ -132,18 +140,42 @@ func searchMemoriesTool(store *memory.Store) actool.CoreTool {
 	})
 }
 
-func saveMemoryTool(store *memory.Store) actool.CoreTool {
-	return writeTool("SaveMemory", "写入/更新一条长期记忆。与 RecordMemory 内容相同，但生成的文件名对中文名安全：norma 的 slug 会把纯中文名清成空串，多个纯中文标题会互相覆盖；本工具对空 slug 使用名称哈希文件名，并重建 MEMORY.md 索引。名称用中文即可；含接口名、参数名等英文锚点更利于以后召回。type 取 user/feedback/project/reference（默认 reference）。", obj(map[string]any{
+func recallMemoryTool(store *memory.Store) actool.CoreTool {
+	return readTool("RecallMemory", "按相关性回忆长期记忆（中英文均可，中文按双字滑窗），返回最相关记忆的正文；与 SearchMemories 同源，保留这个名字兼容旧习惯。", obj(map[string]any{
+		"query": str("要回忆的内容"),
+	}, "query"), func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
+		var a struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		terms := memoryQueryTerms(a.Query)
+		if len(terms) == 0 {
+			return actool.Text("No relevant memories found."), nil
+		}
+		hits := rankMemories(store, terms, 5)
+		if len(hits) == 0 {
+			return actool.Text("No relevant memories found."), nil
+		}
+		return actool.Text(clipMemoryText(renderMemoryHits(hits), readOutputBudget(ctx))), nil
+	})
+}
+
+func recordMemoryTool(store *memory.Store) actool.CoreTool {
+	return writeTool("RecordMemory", "写入/更新一条长期记忆（安全文件名：纯中文标题使用名称哈希，多个中文名不会互相覆盖；写完重建 MEMORY.md）。名称可用中文；含接口名、参数名等英文锚点更利于以后召回。type 取 user/feedback/project/reference（默认 reference）；pinned=true（或 type=feedback、名称以 host- 开头）会被当作常驻记忆，每次注入 worker 系统提示。", obj(map[string]any{
 		"name":        str("记忆标题；同名写入视为更新"),
 		"description": str("一句话摘要"),
 		"type":        str("user | feedback | project | reference，默认 reference"),
 		"content":     str("要记住的事实正文（markdown）"),
+		"pinned":      map[string]any{"type": "boolean", "description": "是否常驻注入，默认 false"},
 	}, "name", "content"), func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
 		var a struct {
 			Name        string `json:"name"`
 			Description string `json:"description"`
 			Type        string `json:"type"`
 			Content     string `json:"content"`
+			Pinned      bool   `json:"pinned"`
 		}
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return actool.Errorf(err.Error()), nil
@@ -161,11 +193,11 @@ func saveMemoryTool(store *memory.Store) actool.CoreTool {
 			return actool.Errorf("type 需为 user/feedback/project/reference"), nil
 		}
 		m := memory.Memory{Name: a.Name, Description: a.Description, Type: memory.Type(typ), Content: a.Content}
-		path, err := saveMemoryFile(store, m)
+		path, err := saveMemoryFile(store, m, a.Pinned)
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		return actool.Text(fmt.Sprintf("已保存记忆 %q（%s）。", a.Name, filepath.Base(path))), nil
+		return actool.Text(fmt.Sprintf("Saved memory %q (%s).", a.Name, filepath.Base(path))), nil
 	})
 }
 
@@ -173,7 +205,7 @@ func saveMemoryTool(store *memory.Store) actool.CoreTool {
 // names get a deterministic hash-based filename, and a name collision with a
 // different memory gets a hash suffix instead of overwriting it. The SDK's
 // MEMORY.md index is rebuilt in the same format so other readers stay correct.
-func saveMemoryFile(store *memory.Store, m memory.Memory) (string, error) {
+func saveMemoryFile(store *memory.Store, m memory.Memory, pinned bool) (string, error) {
 	if strings.TrimSpace(m.Name) == "" || strings.TrimSpace(m.Content) == "" {
 		return "", fmt.Errorf("memory: name and content are required")
 	}
@@ -182,14 +214,14 @@ func saveMemoryFile(store *memory.Store, m memory.Memory) (string, error) {
 		slug = "memory-" + memoryNameHash(m.Name)
 	}
 	path := filepath.Join(store.Dir, slug+".md")
-	if existing, err := readMemoryAt(path); err == nil && !strings.EqualFold(strings.TrimSpace(existing.Name), strings.TrimSpace(m.Name)) {
+	if existing, _, err := readMemoryAt(path); err == nil && !strings.EqualFold(strings.TrimSpace(existing.Name), strings.TrimSpace(m.Name)) {
 		slug = slug + "-" + memoryNameHash(m.Name)
 		path = filepath.Join(store.Dir, slug+".md")
 	}
 	if err := os.MkdirAll(store.Dir, 0o755); err != nil {
 		return "", fmt.Errorf("memory dir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(renderMemoryFile(m)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(renderMemoryFile(m, pinned)), 0o644); err != nil {
 		return "", fmt.Errorf("write memory: %w", err)
 	}
 	if err := rebuildMemoryIndex(store); err != nil {
@@ -203,7 +235,7 @@ func memoryNameHash(name string) string {
 	return fmt.Sprintf("%x", sum[:4])
 }
 
-func renderMemoryFile(m memory.Memory) string {
+func renderMemoryFile(m memory.Memory, pinned bool) string {
 	var b strings.Builder
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "name: %s\n", m.Name)
@@ -211,26 +243,31 @@ func renderMemoryFile(m memory.Memory) string {
 	if m.Type != "" {
 		fmt.Fprintf(&b, "type: %s\n", m.Type)
 	}
+	if pinned {
+		b.WriteString("pinned: true\n")
+	}
 	b.WriteString("---\n\n")
 	b.WriteString(strings.TrimRight(m.Content, "\n"))
 	b.WriteString("\n")
 	return b.String()
 }
 
-func readMemoryAt(path string) (memory.Memory, error) {
+func readMemoryAt(path string) (memory.Memory, bool, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return memory.Memory{}, err
+		return memory.Memory{}, false, err
 	}
-	m := parseMemoryFileText(string(raw))
+	m, pinned := parseMemoryFileText(string(raw))
 	m.Path = path
-	return m, nil
+	return m, pinned, nil
 }
 
 // parseMemoryFileText mirrors norma memory.parseFrontmatter for the subset the
-// tool writes; using our own reader keeps the file format in one place.
-func parseMemoryFileText(s string) memory.Memory {
+// tool writes; using our own reader keeps the file format in one place. The
+// second result is the pinned flag, which the SDK parser intentionally ignores.
+func parseMemoryFileText(s string) (memory.Memory, bool) {
 	var m memory.Memory
+	pinned := false
 	if strings.HasPrefix(s, "---") {
 		rest := strings.TrimPrefix(s, "---")
 		rest = strings.TrimLeft(rest, "\r\n")
@@ -252,13 +289,15 @@ func parseMemoryFileText(s string) memory.Memory {
 					m.Description = v
 				case "type":
 					m.Type = memory.Type(v)
+				case "pinned":
+					pinned = strings.EqualFold(v, "true") || v == "1" || strings.EqualFold(v, "yes")
 				}
 			}
 		}
 	} else {
 		m.Content = s
 	}
-	return m
+	return m, pinned
 }
 
 func rebuildMemoryIndex(store *memory.Store) error {
@@ -298,6 +337,111 @@ func loadMemoryCatalog(store *memory.Store, query string) ([]memory.Memory, erro
 		}
 	}
 	return out, nil
+}
+
+// memoryPinnedFor reports whether a memory is always injected: explicit
+// `pinned: true` frontmatter, type=feedback, or a host- name prefix. The SDK
+// parser ignores the custom frontmatter key, so this stays compatible with
+// everything else that reads the same files.
+func memoryPinnedFor(m memory.Memory) bool {
+	if _, pinned, err := readMemoryAt(m.Path); err == nil && pinned {
+		return true
+	}
+	if m.Type == memory.TypeFeedback {
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(m.Name)), "host-")
+}
+
+// HostPinnedNote renders the always-injected memory list (name + one-line
+// description) for the worker system prompt. Bodies stay behind
+// ReadMemory/RecallMemory so the per-run cost stays bounded.
+func HostPinnedNote(store *memory.Store) string {
+	if store == nil {
+		return ""
+	}
+	mems, err := store.Scan()
+	if err != nil {
+		return ""
+	}
+	var pinned []memory.Memory
+	for _, m := range mems {
+		if memoryPinnedFor(m) {
+			pinned = append(pinned, m)
+		}
+	}
+	if len(pinned) == 0 {
+		return ""
+	}
+	sort.SliceStable(pinned, func(i, j int) bool { return pinned[i].ModTime.After(pinned[j].ModTime) })
+	var b strings.Builder
+	b.WriteString("\n\n【常驻记忆（pinned / feedback / host-，每次注入）】")
+	n := 0
+	for _, m := range pinned {
+		if n >= 8 {
+			break
+		}
+		line := "\n- " + m.Name
+		if strings.TrimSpace(m.Description) != "" {
+			line += "：" + m.Description
+		}
+		if len([]rune(b.String()))+len([]rune(line)) > 900 {
+			break
+		}
+		b.WriteString(line)
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	b.WriteString("\n（完整正文用 ReadMemory 或 RecallMemory 读取。）")
+	return hostClipRunes(b.String(), 950)
+}
+
+// memoryRelevantNote injects a few task-relevant memories at run start, using
+// the same Chinese-aware ranking as RecallMemory. Pinned memories are already
+// covered by HostPinnedNote, so they are skipped here.
+func memoryRelevantNote(store *memory.Store, query string, limit int) string {
+	if store == nil || limit <= 0 {
+		return ""
+	}
+	terms := memoryQueryTerms(query)
+	if len(terms) == 0 {
+		return ""
+	}
+	hits := rankMemories(store, terms, limit+4)
+	var picked []memory.Memory
+	for _, m := range hits {
+		if memoryPinnedFor(m) {
+			continue
+		}
+		picked = append(picked, m)
+		if len(picked) >= limit {
+			break
+		}
+	}
+	if len(picked) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n【相关长期记忆（按当前意图检索）】")
+	n := 0
+	for _, m := range picked {
+		line := "\n- " + m.Name
+		if strings.TrimSpace(m.Description) != "" {
+			line += "：" + m.Description
+		}
+		if len([]rune(b.String()))+len([]rune(line)) > 700 {
+			break
+		}
+		b.WriteString(line)
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	b.WriteString("\n（完整正文用 ReadMemory 读取。）")
+	return b.String()
 }
 
 // findMemory reads by exact name/slug first, then falls back to a
