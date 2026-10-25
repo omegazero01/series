@@ -119,9 +119,39 @@ $ go test ./agent -run 'TestMemory|TestFindMemory|TestRankMemories|TestSaveMemor
 ok  github.com/neouks/series/agent  3.216s
 ```
 
+## 阶段 3b：报错自动沉淀与回注（同一分支追加）
+
+### 改动
+
+- `agent/host_lessons.go`（新增）：
+  - `RecordHostLesson(tool, input, result)` 在工具失败时分类：Bash 的 `&&` ParserError、curl 别名歧义、缺失命令（head/tail/grep/wc/export/python3/touch/cat/sudo/chmod）、`/dev/null`、`/tmp`、cmd 写法、通用 ParserError；asset_search 的 DSL BARE、未知字段、未知参数。按签名去重计数，写入 `<data>/host/lessons.json`；**不保存原始命令/响应**，避免凭据外泄。
+  - `HostLessonNote()` 输出命中次数最高的 6 条经验，注入 Bash 与 asset_search 工具描述；`ConfigureHostLessons("")` 可关闭。
+- `agent/sdk_session.go`：`dispatchHooks.PostToolUse` 在 `isErr` 时先调用 `RecordHostLesson`，再转发给 inner hook。
+- `server/assembly.go`：Bash 描述追加 `HostEnvironmentNote() + HostLessonNote() + shellToolNote()`。
+- `agent/asset_tools.go`：asset_search 描述动态追加 `HostLessonNote()`。
+- `server/manager.go`：启动时 `ConfigureHostLessons(<data>/host/lessons.json)`。
+- `agent/host_lessons_test.go`（新增）：去重计数、6 类 Bash 错误分类、3 类 DSL 错误分类、超时/网络失败不误记、note 渲染/清空、asset_search 描述携带经验。
+
+### 验证输出
+
+```text
+$ go test ./agent -run 'TestRecordHostLesson|TestClassifyHostLesson|TestHostLessonNote|TestAssetSearchDescriptionCarriesHostLessons' -v
+--- PASS: TestRecordHostLessonDedupesAndCounts
+--- PASS: TestClassifyHostLessonKnownBashFailures
+--- PASS: TestClassifyHostLessonDslFailures
+--- PASS: TestClassifyHostLessonIgnoresNoise
+--- PASS: TestHostLessonNoteRendersAndClears
+--- PASS: TestRecordHostLessonWithoutPathIsNoop
+--- PASS: TestAssetSearchDescriptionCarriesHostLessons
+ok  github.com/neouks/series/agent
+
+$ go build ./...
+exit 0
+```
+
 ## 未验证 / 待办
 
 - 未跑真实任务端到端验证；只验证了编译、单测和真实本机探测。错误率对比需要拿真实任务前后各一批 transcript 统计。
 - 未重新构建/替换 `series.exe`；也未启动或重启 SERIES（用户运行中的实例未受影响）。
-- 记忆系统剩余：错误签名自动沉淀（错误→host lessons）、pinned 索引/常驻注入；norma `RecordMemory` 仍会覆盖纯中文名，需要模型改用 `SaveMemory` 或后续修 SDK slug。
+- 记忆系统剩余：pinned 索引/常驻注入；norma `RecordMemory` 仍会覆盖纯中文名，需要模型改用 `SaveMemory` 或后续修 SDK slug；`host/lessons.json` 目前每次报错都做一次原子写，后续可按签名加内存去抖。
 - 本机首次工具装配时会执行两次 PowerShell 只读探测（版本 + 别名），有 3 秒超时保护；探测结果进程内缓存。

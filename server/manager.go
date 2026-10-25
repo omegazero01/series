@@ -420,6 +420,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if err := agent.ConfigureToolUA(filepath.Join(dir, "tool-http")); err != nil {
 		log.Printf("[manager] curl/wget 默认 UA 配置失败（不影响启动）：%v", err)
 	}
+	// Host lessons: failed Bash/DSL calls are distilled into <data>/host/lessons.json
+	// and surfaced in the Bash / asset_search descriptions on the next run.
+	agent.ConfigureHostLessons(filepath.Join(dir, "host", "lessons.json"))
 	dsn, source, err := pgdb.DSN()
 	if err != nil {
 		return nil, err

@@ -331,7 +331,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool, configRoot ...st
 		// attached (on Windows it explains that commands actually run through
 		// PowerShell); user-defined kind="shell" declarations are appended when
 		// present.
-		if note := agent.HostEnvironmentNote() + shellToolNote(rows, agentKey); note != "" {
+		if note := agent.HostEnvironmentNote() + agent.HostLessonNote() + shellToolNote(rows, agentKey); note != "" {
 			for i, t := range out {
 				if t.Name() == "Bash" {
 					out[i] = agent.DecorateTool(t, t.Description()+note, t.InputSchema())
