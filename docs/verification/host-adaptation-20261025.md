@@ -87,9 +87,41 @@ domain != "localhost"
 args = ["%example.com%", "%api%", 443]
 ```
 
+## 阶段 3a：记忆目录、中文检索与安全写入（同一分支追加）
+
+### 发现的 SDK 限制
+
+norma `memory.slug()` 的规则是 `[^a-z0-9]+ → -` 再去首尾 `-`。纯中文标题会得到空 slug，写到 `data/memory/.md`；多个纯中文名会互相覆盖。现有 66 条记忆大多含英文锚点（接口名/参数名/技术名），所以尚未全部撞在一起，但纯中文标题存在覆盖风险。
+
+### 改动
+
+- `agent/memory_tools.go`（新增）：
+  - `ListMemories`：列出记忆目录（名称、类型、描述、保存时间），支持中文子串过滤，中文标题无需分词即可看到。
+  - `SearchMemories`：英文按 `[a-z0-9_]{2,}` 词、中文按双字滑窗（bigram）检索，返回最相关记忆正文；解决 norma `RecallMemory` 纯中文查询 0 token 召回为空的问题。
+  - `ReadMemory`：按名称/slug 读取正文；`Read()` 返回结果与请求名不符时（纯中文名空 slug 导致读到 `.md`）回退全目录扫描，未命中时给相近候选。
+  - `SaveMemory`：纯中文名使用 `memory-<sha1前4字节>` 文件名，同名视为更新，不同名同 slug 追加哈希后缀；写完后按 SDK 相同格式重建 `MEMORY.md`。
+- `agent/worker.go`：worker 绑定上述 4 个工具；系统提示追加一段记忆使用说明（先看目录、命中先读、本机/工具坑解决后用 `SaveMemory` 记录）。
+- `agent/memory_tools_test.go`（新增）：中文子串目录过滤、中英文分词、纯中文检索命中、纯中文标题读取回退、两个纯中文名不同文件不覆盖、同名更新、MEMORY.md 重建、4 个工具名。
+
+### 验证输出
+
+```text
+$ go test ./agent -run 'TestMemory|TestFindMemory|TestRankMemories|TestSaveMemory|TestBuildHostEnvironmentNote' -v
+--- PASS: TestBuildHostEnvironmentNoteWindows
+--- PASS: TestBuildHostEnvironmentNoteOmitsUnknownPowershellVersion
+--- PASS: TestBuildHostEnvironmentNoteNonWindowsIsEmpty
+--- PASS: TestMemoryCatalogSupportsChineseSubstring
+--- PASS: TestMemoryQueryTermsHandlesChineseAndEnglish
+--- PASS: TestRankMemoriesFindsChineseOnlyMemory
+--- PASS: TestFindMemoryFallsBackToChineseTitle
+--- PASS: TestMemoryCatalogToolsExposeReadAndSaveTools
+--- PASS: TestSaveMemoryFileKeepsChineseNamesDistinct
+ok  github.com/neouks/series/agent  3.216s
+```
+
 ## 未验证 / 待办
 
 - 未跑真实任务端到端验证；只验证了编译、单测和真实本机探测。错误率对比需要拿真实任务前后各一批 transcript 统计。
 - 未重新构建/替换 `series.exe`；也未启动或重启 SERIES（用户运行中的实例未受影响）。
-- 记忆系统阶段（中文分词、索引、pinned host lessons、错误签名沉淀）尚未实现。
+- 记忆系统剩余：错误签名自动沉淀（错误→host lessons）、pinned 索引/常驻注入；norma `RecordMemory` 仍会覆盖纯中文名，需要模型改用 `SaveMemory` 或后续修 SDK slug。
 - 本机首次工具装配时会执行两次 PowerShell 只读探测（版本 + 别名），有 3 秒超时保护；探测结果进程内缓存。

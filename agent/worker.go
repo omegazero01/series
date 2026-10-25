@@ -492,6 +492,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if err := requireRoleTools("worker", tools); err != nil {
 		return harness.ReasonAbortedTools, WriteCounts{}, err
 	}
+	if w.mem != nil {
+		// Memory catalogue/search/read: norma's RecallMemory is English-token
+		// only and the MEMORY.md index is not injected, so the worker otherwise
+		// cannot discover Chinese-titled or non-keyword memories.
+		tools = append(tools, memoryCatalogTools(w.mem)...)
+	}
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
 	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，
@@ -510,6 +516,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		promptCACert = w.proxyCACert
 	}
 	sysBody := workerSystem(runProxyAddr, promptCACert, w.workDir, runDir)
+	if w.mem != nil {
+		sysBody += memoryUsageHint
+	}
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
