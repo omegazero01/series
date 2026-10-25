@@ -1099,19 +1099,11 @@ export default function FindingsPage() {
               <span className="text-muted-foreground text-xs">导出格式</span>
               <RadioGroup value={exportFormat} onValueChange={(v) => setExportFormat(v as typeof exportFormat)}>
                 <label htmlFor="export-format-md-report" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-format-md-report" value="md-report" /> 提交报告（单个 .md，不含证据/汇总）
+                  <RadioGroupItem id="export-format-md-report" value="md-report" /> 提交报告（单个 .md 文件）
                 </label>
                 <label htmlFor="export-format-md-report-zip" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-format-md-report-zip" value="md-report-zip" /> 提交报告（一漏洞一 .md，打包
                   .zip）
-                </label>
-                <label htmlFor="export-format-md-single" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-format-md-single" value="md-single" /> Markdown 报告（单个
-                  .md，内容同提交版）
-                </label>
-                <label htmlFor="export-format-md-zip" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-format-md-zip" value="md-zip" /> Markdown 分文件（一漏洞一
-                  .md，内容同提交版）
                 </label>
                 <label htmlFor="export-format-csv" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-format-csv" value="csv" /> CSV 表格（.csv）
