@@ -280,6 +280,16 @@ func (h *dispatchHooks) PreToolUse(ctx context.Context, outer string, input []by
 }
 
 func (h *dispatchHooks) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
+	if isErr {
+		// Host-level error distillation runs before the inner hook so the
+		// lesson is recorded even if the inner hook returns early. The
+		// recorder is a no-op when ConfigureHostLessons has not been called.
+		if target, params, err := h.target(name, input); err == nil {
+			RecordHostLesson(target, params, result)
+		} else {
+			RecordHostLesson(name, input, result)
+		}
+	}
 	if h.inner == nil {
 		return
 	}

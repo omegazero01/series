@@ -492,6 +492,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if err := requireRoleTools("worker", tools); err != nil {
 		return harness.ReasonAbortedTools, WriteCounts{}, err
 	}
+	if w.mem != nil {
+		// Memory catalogue/search/read: norma's RecallMemory is English-token
+		// only and the MEMORY.md index is not injected, so the worker otherwise
+		// cannot discover Chinese-titled or non-keyword memories.
+		tools = append(tools, memoryCatalogTools(w.mem)...)
+	}
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
 	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，
@@ -509,7 +515,13 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if w.trafficRecording {
 		promptCACert = w.proxyCACert
 	}
+	intentText := renderIntentTask(intent)
 	sysBody := workerSystem(runProxyAddr, promptCACert, w.workDir, runDir)
+	if w.mem != nil {
+		sysBody += memoryUsageHint
+		sysBody += HostPinnedNote(w.mem)
+		sysBody += memoryRelevantNote(w.mem, string(intent.Payload), 3)
+	}
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
@@ -517,7 +529,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		sysBody += smartProxyRule // 智能代理:何时把被拦截的主机切到代理池
 	}
 	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
-	sysBody += renderIntentTask(intent)
+	sysBody += intentText
 	if as != nil {
 		if len(intentAssets) > 0 {
 			// Reuse the already-validated lineage. Parent-only targets must not
@@ -614,9 +626,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		NonStreaming:  w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:     w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
 	}
-	if w.mem != nil {
-		opts.Memory = &agentcore.MemoryOptions{Store: w.mem, AutoInject: true, MaxInject: 3}
-	}
+	// Memory: instead of the SDK's MemoryOptions (English-token recall, no index,
+	// slug() collapses pure-Chinese names), this worker uses SERIES' own
+	// RecallMemory/RecordMemory/List/Search/Read tools plus pinned + relevant
+	// system-prompt notes. w.mem is still the shared store, so files stay
+	// compatible with the rest of norma.
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
 	}
