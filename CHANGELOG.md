@@ -12,6 +12,8 @@
 - **报告提交版与技术明细拆分**：`findings` 新增 `report_detail`，reporter 的一次输出可包含 `SERIES:TECHNICAL` 内部附录；保存时自动拆成人类提交版 `report` 和完整技术明细 `report_detail`，旧报告启动时原样回填。`context_search`/`context_get` 的 `/report` 读取完整技术明细，`/report_human` 读取提交版；导出增加 `md-report`/`md-report-zip`，只输出提交版，不混入证据、汇总和任务描述。
 - **所有导出格式统一只输出提交版报告**：`md-single`/`md-zip` 旧格式不再输出“汇总 + 证据 + 任务描述”，与 `md-report`/`md-report-zip` 一样只导出 `findings.report`；CSV 改为“漏洞名称（取报告标题）+ 提交报告全文”，不再导出概述/证据列；JSON 清空技术明细 `report_detail`，不返回给下载方。任务详情页的“导出选中发现”也改用提交版 ZIP。
 - **Agent 发起的 curl/wget 默认携带浏览器 User-Agent**：此前 LLM 调用 curl 测试目标时 UA 是 `curl/x.x`，容易被最简单的指纹规则识别。现在 `<数据目录>/tool-http/` 下自动生成 `.curlrc` 与 `wgetrc`（默认为固定的桌面 Chrome UA），并通过 `CURL_HOME`/`WGETRC` 注入所有 Agent 的 Bash 会话——与是否开启流量捕获无关；模型显式传 `-A/--user-agent` 时仍以命令行为准。配置文件已存在则不覆盖，可手工修改自定义 UA；交互式 shell 会话同样生效。Python requests 等其它客户端不在本次范围。
+- **Bash 工具描述固定注入本机运行环境说明**：Windows 上 Bash 工具实际由 Windows PowerShell 执行，模型按 bash/cmd 习惯写 `&&`、`dir /b`、`cd /d`、`2>/dev/null`、`head/tail`、`/tmp` 时频繁报 ParserError。现在进程启动后只读探测一次本机 shell 版本、`curl` 别名和 `curl.exe` 路径，把一段不超过 900 字符的说明固定追加到 Bash 工具描述（所有绑定 Bash 的 Agent 生效）：说明 PowerShell 语法、`curl.exe`、`$env:TEMP`、复杂命令写脚本，并要求语法错误后按提示修正而不是原样重试。非 Windows 主机不注入，保持原有 bash 行为。
+
 - **Planner 态势窗口新增精简模式（实验，默认关闭）**：设置页「实验功能」新增「Planner 态势窗口」，可选完整（默认）或精简。精简模式只向 Planner 预注入目标、完整 frontier、最近 8 条事实、3 条漏洞摘要、10 条提示和读取入口，预算约 10k 字符；完整血缘、较早事实/意图/漏洞和冷摘要正文仍可通过 `context_search` / `context_get` 按需读取。探索图、资产锚点、权限、审计与 UI 回放不变；切换在下一轮规划生效，无需重建 Agent。
 - **Planner 态势窗口支持自定义数值**：同一张设置卡新增「高级参数」，可分别调整完整/精简模式的事实、发现、目标、完成意图、提示、冷摘要条数和总字符预算；每项显示允许范围与默认值，支持恢复当前模式或全部默认。配置保存在 `settings.planner_overview_config`，每轮规划读取，下一轮生效；服务端校验上限，`open_intents`/`running_intents` 仍不截断。`SERIES_PLANNER_OVERVIEW` 环境变量存在时强制使用预设默认值，保证 TSecBench 等 A/B 评测不受 UI 配置影响。
 - **精简态势按当前方向/唤醒事件选择事实**：lean 模式不再只取最近 8 条，而是以最近事实为基线，额外按当前 `open/running` 意图和本轮 `done/finding` 触发召回直接 `yields` 的事实，并补 `derived_from` 一跳事实。事实分数由基础分和加成组成：trigger 直接产出 100、trigger 一跳 80、frontier 直接产出 40、frontier 一跳 15；再加新旧 0–5、`observed` 证据 +3、来源意图 priority 折半 0–5。同一意图最多 2 条，最终条数完全由 `planner_overview_config.lean.recent_facts` 决定（8/12/20 都是同一套逻辑，不写死）。候选事实沿用现有可见性过滤，查询失败保留最近事实；完整模式不变。可用 `SERIES_PLANNER_FACT_SELECTION=off` 关闭。
@@ -26,6 +28,7 @@
 
 #### 变更的行为
 
+- **asset_search DSL 兼容空格与 `contains` / `=~`**：此前 `domain = "x"`、`url contains "x"`、`url =~ 'x'` 会因词法严格报 `DSL 语法错误：意外的内容 'BARE'`。现在运算符两侧允许空格；`contains`、`=~` 等价于模糊匹配 `=`，`==` 仍为精确匹配；单双引号都按引用值处理（不再把单引号留在 SQL 模式里）。`agent/asset_tools.go` 的工具描述补齐字段清单、`=`/`==` 语义、`type` 不是 `types`、路径查询用 `url` 等规则；BARE 错误信息附带正确写法示例。
 - **资产审批改为按主机精确授权：封禁/撤回/删除/批准主域名不再牵连下属子域名**。此前封禁、撤回或从任务删除一个根域名，会把其所有子域名（以及子域主机上的服务/接口）一并置为不可执行，批准根域名也不会自动批准子域——但墓碑和父链接状态按域后缀级联，与"资产各自审批"的展示语义不一致。现统一为：**授权只作用于该资产自身主机**，同主机的多条 DNS 记录、服务、接口照常继承该主机的决定；不同主机的子域名完全独立，保持各自的审批状态。具体变化：
   - 封禁/撤回/删除根域名后，子域名资产的生效状态、主机网络访问、意图认领和 Worker 执行均不受影响；运行中的 Worker 也只取消锚定在该主机上的，子域 Worker 继续运行。
   - 批准根域名后，新发现的子域名仍为待审批（此前资产层已如此，本次消除了服务/接口从祖先域继承批准的通道：子域主机上没有独立子域资产时，其服务/接口为待审批状态——Worker 仍可执行待审批资产，Planner 严格下发需先批准该子域）。

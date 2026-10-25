@@ -327,10 +327,11 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool, configRoot ...st
 				out[i] = &shellMeteredTool{CoreTool: tool, recorder: pg, declarations: rows, agentKey: agentKey, ri: runInfo, configRoot: root}
 			}
 		}
-		// shell hints: user-defined kind="shell" tools are not callable — they are
-		// environment declarations that tell the model which command-line tools are
-		// installed. Collect the ones bound to this agent and append to Bash's description.
-		if note := shellToolNote(rows, agentKey); note != "" {
+		// Bash description addenda: the host execution-environment note is always
+		// attached (on Windows it explains that commands actually run through
+		// PowerShell); user-defined kind="shell" declarations are appended when
+		// present.
+		if note := agent.HostEnvironmentNote() + shellToolNote(rows, agentKey); note != "" {
 			for i, t := range out {
 				if t.Name() == "Bash" {
 					out[i] = agent.DecorateTool(t, t.Description()+note, t.InputSchema())
