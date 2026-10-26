@@ -80,3 +80,18 @@ func TestOverrideToolPromptDropsSDKText(t *testing.T) {
 		t.Fatal("override must delegate everything except Prompt()")
 	}
 }
+
+func TestRegistrySchemaDropsSDKPromptAfterOverride(t *testing.T) {
+	base := actool.NewBash()
+	before := actool.NewRegistry(base).Schemas()[0].Description
+	if !strings.Contains(before, "chain steps with") {
+		t.Fatalf("SDK schema no longer carries the generic prompt: %q", before)
+	}
+	after := actool.NewRegistry(OverrideToolPrompt(base, "")).Schemas()[0].Description
+	if strings.Contains(after, "chain steps with") || strings.Contains(after, "heredoc") {
+		t.Fatalf("override must remove the SDK prompt from the rendered schema:\n%s", after)
+	}
+	if !strings.Contains(after, "Executes a shell command") {
+		t.Fatalf("base description must survive the override:\n%s", after)
+	}
+}
