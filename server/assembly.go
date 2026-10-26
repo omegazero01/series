@@ -339,6 +339,18 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool, configRoot ...st
 				}
 			}
 		}
+		// Bash extended prompt: the SDK prompt suggests && chaining and heredocs,
+		// which Windows PowerShell rejects, and it sits after the host note in the
+		// rendered description. Replace it where the host says so (see
+		// agent.BashPromptOverride); the note above carries the accurate guidance.
+		if prompt, ok := agent.BashPromptOverride(); ok {
+			for i, t := range out {
+				if t.Name() == "Bash" {
+					out[i] = agent.OverrideToolPrompt(t, prompt)
+					break
+				}
+			}
+		}
 		// interactive shell: gated purely by the agent's interactive_shell flag (like
 		// web_search), NOT by tools-table binding. When on, inject the 5 shell_* tools
 		// and COUPLE the Bash description addendum so it points at shell_open — and never

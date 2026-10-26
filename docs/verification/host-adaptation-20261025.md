@@ -179,3 +179,33 @@ exit 0
 - 现有存量纯中文名记忆如果之前已经被 SDK 覆盖，只能看到覆盖后的那一份；本分支只保证新写入不再覆盖。
 - 常驻注入给的是名称+描述，不注入全文；如果希望常驻记忆正文也每次可见，需要单独开设置项并评估 token。
 - 本机首次工具装配时会执行两次 PowerShell 只读探测（版本 + 别名），有 3 秒超时保护；探测结果进程内缓存。
+
+## 2026-10-26 追加：Windows 下删除 SDK Bash 通用提示
+
+背景：实测 `llm_records.raw_request`，模型看到的 Bash 描述由四段拼成——SDK 短句、本机运行环境说明、本机经验、**SDK 通用提示**。最后一段建议「`&&` 串联命令」「heredoc 传多行脚本」，而本机 Bash 实际由 Windows PowerShell 5.1 执行，两招都会报 ParserError；该段由 `Registry.Schemas()` 拼在描述末尾（Description + "\n\n" + Prompt），位置比本机说明更靠后。10-26 当天复现的解析类失败（`python - <<'PY'`、`python -c "多行"`）全部属于该段引导的写法，且事发 run 的每次请求都带本机经验提示（如 `exp166-worker-i12111` 56/56 次调用均带「命令被 PowerShell 解析失败」）。
+
+改动：
+- `agent/toolcatalog.go`：新增 `promptOverrideTool` / `OverrideToolPrompt(t, prompt)`，只覆盖 `Prompt()`，其余方法全部委托。
+- `agent/host_profile.go`：新增 `BashPromptOverride()`（Windows 返回空串 + ok=true，非 Windows 返回 ok=false 保持 SDK 原文）。
+- `server/assembly.go`：Bash 描述装饰之后按 `BashPromptOverride()` 覆盖扩展提示。
+
+### 验证输出
+
+```text
+$ gofmt -l agent/host_profile.go agent/toolcatalog.go server/assembly.go agent/host_profile_test.go
+（无输出）
+
+$ go test ./agent -run 'TestBashPromptOverride|TestOverrideToolPrompt' -v -count=1
+--- PASS: TestBashPromptOverrideOnlyOnWindows
+--- PASS: TestOverrideToolPromptDropsSDKText
+ok  github.com/neouks/series/agent
+
+$ go build ./agent ./server
+build OK
+```
+
+### 未验证 / 待办
+
+- `./agent` 全量测试有 3 个先存在的失败（`TestCaptureApprovalLifecycle`、`TestWorkerReviewContextAcrossToolCalls`、`TestRealCurlPicksUpUserAgent`）；已 `git stash` 在基线复跑确认与本次改动无关（环境依赖）。
+- 未跑真实任务端到端：需重启实例后抓一次 `llm_records.raw_request`，确认 Bash 描述里 `chain steps with &&` 段消失、本机说明与本机经验仍在。
+- 未重新构建/替换 `series.exe`。
