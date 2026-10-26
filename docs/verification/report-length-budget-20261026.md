@@ -39,3 +39,10 @@ go test -count=1 ./agent -run 'TestContextPromptMetrics|TestChineseLanguagePolic
 - 同日评审发现的其它问题不在本次范围：步骤计数正则仍只认“步骤N”（`**1.**` 编号不计步数）；漏洞类型校验仍放行 ` / `（复合类型）；未约束“备注”类额外段落；ZIP 条目时间戳仍为零值（1980-00-00）。
 - 已导出的旧报告不改写；重新生成报告时才按新预算执行。
 - 运行中的 `series.exe` 未重启；v2 提示词升级在下次启动时生效。
+
+## 构建（2026-10-26）
+
+- 合并：功能分支 `fix/report-length-budget`（`8b6ef32`）→ `main` `fe78179`（`merge: 提交报告字数预算收紧`）。
+- 前端无改动，跳过前端构建：`SERIES_SKIP_FRONTEND=1 SERIES_SKIP_NPM_CI=1 ./build.sh --target windows/amd64`。
+- `dist/series-windows-amd64/series.exe` 版本 `fe78179`，SHA-256 `7c52d3f920159369b1cbb3edd541d4c5b2705129d1871e668c466e9d51b4d295`；`-h` 退出码 0。
+- 根目录 `series.exe` 已替换为同一文件（备份 `series.exe.bak-20261026-172329`，旧 SHA-256 `1a2820cf…`）；运行中的进程未停止，重启后生效。
