@@ -35,6 +35,27 @@ var (
 	findingReportEvidenceHeading = regexp.MustCompile(`(?m)^#{1,3}\s*证据\s*$`)
 	findingReportInternalNote    = regexp.MustCompile(`(?m)^#{1,3}\s*(流量绑定说明|克制说明)\s*$`)
 	findingReportStepHeading     = regexp.MustCompile(`(?m)^(?:#{2,4}\s*)?(?:\*\*)?步骤\s*[0-9一二三四五六七八九十]`)
+	findingReportListItem        = regexp.MustCompile(`(?m)^\s*(?:[-*+]|\d+[.)、])\s+(.*)$`)
+)
+
+// Length budgets for the human submission. The fixed template alone does not
+// stop a report from packing the same evidence into three sections: the
+// reviewer needs location/cause/impact in 详细描述, the blast radius in
+// 影响范围 and actionable steps in 修复方案; everything else belongs in the
+// technical appendix (kept for context_search, never exported). Calibrated
+// 2026-10-26 against two real exports whose 详细描述 ran 512–648 runes,
+// 影响范围 720–1059 and 修复方案 707–755 — roughly half of that repeated
+// 复现步骤 or belonged in the appendix.
+const (
+	findingReportDescRunes         = 350 // 详细描述上限（字）
+	findingReportDescSentenceMax   = 4   // 详细描述句数上限
+	findingReportDescSentenceRunes = 120 // 详细描述单句上限（防“大句”绕过句数）
+	findingReportImpactRunes       = 200 // 影响范围合计上限（字）
+	findingReportImpactItemMax     = 4   // 影响范围条数上限
+	findingReportImpactItemRunes   = 60  // 影响范围单条上限（字）
+	findingReportFixRunes          = 400 // 修复方案合计上限（字）
+	findingReportFixItemMax        = 4   // 修复方案条数上限
+	findingReportFixItemRunes      = 120 // 修复方案单条上限（字）
 )
 
 func reportLabelValue(report, label string) string {
@@ -83,6 +104,104 @@ func countSentenceEndings(text string) int {
 	return strings.Count(text, "。") + strings.Count(text, "！") + strings.Count(text, "？") + strings.Count(text, "!") + strings.Count(text, "?")
 }
 
+// reportSentenceLengths returns the rune length of each sentence-like segment,
+// breaking on sentence punctuation AND on newlines. Semicolons do not end a
+// sentence, so one mega-clause could otherwise satisfy “≤4 句” while carrying a
+// whole paragraph; the per-segment cap closes that gap.
+func reportSentenceLengths(text string) []int {
+	var out []int
+	cur := 0
+	for _, r := range text {
+		switch r {
+		case '\n':
+			if cur > 0 {
+				out = append(out, cur)
+				cur = 0
+			}
+		case '。', '！', '？', '!', '?':
+			out = append(out, cur+1)
+			cur = 0
+		default:
+			cur++
+		}
+	}
+	if cur > 0 {
+		out = append(out, cur)
+	}
+	return out
+}
+
+// reportListItems returns the text of bullet / numbered lines (any indent).
+// Nested items count too: an interface list belongs in the technical appendix,
+// not in 影响范围.
+func reportListItems(section string) []string {
+	ms := findingReportListItem.FindAllStringSubmatch(section, -1)
+	items := make([]string, 0, len(ms))
+	for _, m := range ms {
+		items = append(items, strings.TrimSpace(m[1]))
+	}
+	return items
+}
+
+func validateFindingReportDescribe(human string) error {
+	desc := reportSection(human, "## 详细描述")
+	if desc == "" {
+		return fmt.Errorf("详细描述为空")
+	}
+	if n := utf8.RuneCountInString(desc); n > findingReportDescRunes {
+		return fmt.Errorf("详细描述最多 %d 字（当前 %d 字）：只写位置、原因、影响，可用一句说明定级依据；内网地址、组件版本、清单、字节数等细节放技术附录", findingReportDescRunes, n)
+	}
+	if n := countSentenceEndings(desc); n > findingReportDescSentenceMax {
+		return fmt.Errorf("详细描述最多 %d 句（当前 %d 句）：把过程、枚举与验证细节放技术附录", findingReportDescSentenceMax, n)
+	}
+	for _, n := range reportSentenceLengths(desc) {
+		if n > findingReportDescSentenceRunes {
+			return fmt.Errorf("详细描述单句最长 %d 字（当前有 %d 字的长句）：拆成短句，细节放技术附录", findingReportDescSentenceRunes, n)
+		}
+	}
+	return nil
+}
+
+func validateFindingReportImpact(human string) error {
+	impact := reportSection(human, "## 影响范围")
+	if impact == "" {
+		return nil // 可选段落
+	}
+	if n := utf8.RuneCountInString(impact); n > findingReportImpactRunes {
+		return fmt.Errorf("影响范围最多 %d 字（当前 %d 字）：只写受影响对象与后果；接口清单、版本号、枚举结果、未验证细节放技术附录", findingReportImpactRunes, n)
+	}
+	items := reportListItems(impact)
+	if len(items) > findingReportImpactItemMax {
+		return fmt.Errorf("影响范围最多 %d 条（当前 %d 条）：只留受影响的系统与后果，其余清单放技术附录", findingReportImpactItemMax, len(items))
+	}
+	for i, item := range items {
+		if n := utf8.RuneCountInString(item); n > findingReportImpactItemRunes {
+			return fmt.Errorf("影响范围第 %d 条 %d 字，超过每条 %d 字：一句话写完，细节放技术附录", i+1, n, findingReportImpactItemRunes)
+		}
+	}
+	return nil
+}
+
+func validateFindingReportFix(human string) error {
+	fix := reportSection(human, "## 修复方案")
+	if fix == "" {
+		return fmt.Errorf("修复方案为空")
+	}
+	if n := utf8.RuneCountInString(fix); n > findingReportFixRunes {
+		return fmt.Errorf("修复方案最多 %d 字（当前 %d 字）：最多 %d 条、每条一两句动作+目标状态；配置样例、阈值参数、事后处置清单放技术附录", findingReportFixRunes, n, findingReportFixItemMax)
+	}
+	items := reportListItems(fix)
+	if len(items) > findingReportFixItemMax {
+		return fmt.Errorf("修复方案最多 %d 条（当前 %d 条）：合并同类动作，实施细节放技术附录", findingReportFixItemMax, len(items))
+	}
+	for i, item := range items {
+		if n := utf8.RuneCountInString(item); n > findingReportFixItemRunes {
+			return fmt.Errorf("修复方案第 %d 条 %d 字，超过每条 %d 字：一条只写动作与目标状态", i+1, n, findingReportFixItemRunes)
+		}
+	}
+	return nil
+}
+
 func validateFindingReportMeta(human string) error {
 	allowedLevels := map[string]bool{"严重": true, "高危": true, "中危": true, "低危": true}
 	if level := reportLabelValue(human, "**漏洞等级：**"); !allowedLevels[level] {
@@ -128,12 +247,8 @@ func validateFindingReportType(human string) error {
 }
 
 func validateFindingReportBody(human string) error {
-	desc := reportSection(human, "## 详细描述")
-	if desc == "" {
-		return fmt.Errorf("详细描述为空")
-	}
-	if utf8.RuneCountInString(desc) > 1200 || countSentenceEndings(desc) > 5 {
-		return fmt.Errorf("详细描述只写位置、原因、影响，控制在 2–5 句；技术细节放技术附录")
+	if err := validateFindingReportDescribe(human); err != nil {
+		return err
 	}
 	steps := reportSection(human, "## 复现步骤")
 	if steps == "" {
@@ -201,6 +316,12 @@ func validateFindingReport(report string) error {
 		return err
 	}
 	if err := validateFindingReportBody(human); err != nil {
+		return err
+	}
+	if err := validateFindingReportImpact(human); err != nil {
+		return err
+	}
+	if err := validateFindingReportFix(human); err != nil {
 		return err
 	}
 	return nil

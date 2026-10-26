@@ -30,9 +30,12 @@ func IsLegacyReporterPrompt(text string) bool {
 
 // Code defaults immediately before the tool documentation audit. Never derive
 // these from the current templates: that would silently skip upgraded installs.
+// b1549aff… is the reporter default immediately before the 2026-10-26 report
+// length-budget revision; reseedReporterPrompt v2 relies on it to upgrade
+// installs that already ran the v1 reseed.
 var PreviousToolContractPromptHashes = map[string][]string{
 	"mainagent": {"09742a82b10a359d9fe681abf4bb45fc671b6a3dd640efcf14a15b0315e30217"},
 	"planner":   {"00b7469a6a0a7419d9997983136c620efb7e994dae54fd9ca88241ed833917b0", "c549a5b26d070ccb6a4c2face9fc794a3d94cac0f2366088b0780c11adce28af"},
 	"auto":      {"8eec58f253f03172b8e48db159ec8a1cb5b001ee0e6f929f56782b239f3fa5d8"},
-	"reporter":  {"d95a892584a10ac8afb2434714601caa346e158f839785ff132d5424028fd628"},
+	"reporter":  {"d95a892584a10ac8afb2434714601caa346e158f839785ff132d5424028fd628", "b1549affe3832f330d2d7a07857cec79b9b9df8b1ec47736f79ae18654013626"},
 }

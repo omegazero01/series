@@ -433,10 +433,10 @@ func (s *Server) toolGetTaskNodeDetail() actool.CoreTool {
 // task-agnostic, so this host tool needs no task_id / exploration store.
 func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 	return wrTool("update_finding_report",
-		"为已登记的漏洞写入/更新【提交报告】(Markdown 全文,整段覆盖旧内容)。finding_node_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告必须按固定模板包含:漏洞名称、漏洞等级、漏洞类型、漏洞URL、详细描述、复现步骤(完整请求包/响应包)、影响范围(可选)、修复方案；不要单独写证据段。正文末尾可用 <!-- SERIES:TECHNICAL:BEGIN --> ... <!-- SERIES:TECHNICAL:END --> 包住仅供内部检索的技术附录；该块不会导出给审核员。",
+		"为已登记的漏洞写入/更新【提交报告】(Markdown 全文,整段覆盖旧内容)。finding_node_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告必须按固定模板包含:漏洞名称、漏洞等级、漏洞类型、漏洞URL、详细描述(最多 4 句/350 字,单句不超过 120 字:位置、原因、影响、一句定级依据)、复现步骤(≤6 步,完整请求包/响应包,不限字数)、影响范围(可选,最多 4 条/每条一行 60 字内/合计 200 字内)、修复方案(最多 4 条/每条 120 字内/合计 400 字内);不要单独写证据段;超出声明的细节放技术附录。正文末尾可用 <!-- SERIES:TECHNICAL:BEGIN --> ... <!-- SERIES:TECHNICAL:END --> 包住仅供内部检索的技术附录；该块不会导出给审核员。",
 		objSchema(map[string]any{
 			"finding_node_id":  positiveIDParam("report_finding 返回的 finding_node_id（探索节点），正整数或数字字符串"),
-			"report":           strParam("提交报告全文,Markdown 格式；技术附录用 SERIES:TECHNICAL 注释块包住"),
+			"report":           strParam("提交报告全文,Markdown 格式；字数预算见工具说明；技术附录用 SERIES:TECHNICAL 注释块包住"),
 			"evidence_version": map[string]any{"type": "integer", "description": "get_finding_traffic 返回的证据 version；用于防止报告覆盖新的证据变更"},
 		}, "finding_node_id", "report"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
@@ -830,10 +830,11 @@ func (s *Server) seedReporterAgent() {
 }
 
 // reseedReporterPrompt upgrades only the known old reporter defaults to the
-// fixed SRC report template. A prompt the user edited is left untouched; the
-// version history keeps the old prompt available from the UI.
+// current fixed SRC report template (v2 adds the 2026-10-26 length budgets).
+// A prompt the user edited is left untouched; the version history keeps the
+// old prompt available from the UI.
 func (s *Server) reseedReporterPrompt() {
-	const flag = "reporter_prompt_src_template_v1"
+	const flag = "reporter_prompt_src_template_v2"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
