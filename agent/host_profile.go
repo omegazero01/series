@@ -108,6 +108,28 @@ func buildHostEnvironmentNote(p hostProfile) string {
 	return hostClipRunes(b.String(), 900)
 }
 
+// BashPromptOverride returns the text that replaces the Bash tool's extended
+// prompt on this host (norma renders the model-facing description as
+// Description + "\n\n" + Prompt). The SDK default advertises Unix syntax the
+// host cannot run — "chain steps with && or ;" and "pass multi-line scripts or
+// heredocs" — and Windows PowerShell 5.1 answers `&&` with "The token '&&' is
+// not a valid statement separator" and `<` with "The operator '<' is reserved
+// for future use"; that mismatch is what the recorded host lessons keep
+// reporting. On Windows the override drops the SDK text entirely: accurate
+// guidance already lives in HostEnvironmentNote plus the host lessons, and the
+// timeout bounds stay in the tool's input schema. ok=false means "keep the SDK
+// prompt unchanged" (non-Windows hosts).
+func BashPromptOverride() (string, bool) {
+	return bashPromptOverrideFor(runtime.GOOS)
+}
+
+func bashPromptOverrideFor(goos string) (string, bool) {
+	if goos != "windows" {
+		return "", false
+	}
+	return "", true
+}
+
 func hostClipRunes(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
