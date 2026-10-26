@@ -195,9 +195,10 @@ exit 0
 $ gofmt -l agent/host_profile.go agent/toolcatalog.go server/assembly.go agent/host_profile_test.go
 （无输出）
 
-$ go test ./agent -run 'TestBashPromptOverride|TestOverrideToolPrompt' -v -count=1
+$ go test ./agent -run 'TestBashPromptOverride|TestOverrideToolPrompt|TestRegistrySchemaDropsSDKPrompt' -v -count=1
 --- PASS: TestBashPromptOverrideOnlyOnWindows
 --- PASS: TestOverrideToolPromptDropsSDKText
+--- PASS: TestRegistrySchemaDropsSDKPromptAfterOverride
 ok  github.com/neouks/series/agent
 
 $ go build ./agent ./server
