@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -178,17 +179,26 @@ func ParseAllianceEndpointURL(raw string) (norm, host, scheme string, port *int,
 
 const allianceSystemCols = `id, name, COALESCE(url,''), COALESCE(owner_unit,''), COALESCE(platform,''),
 COALESCE(framework,''), COALESCE(crypto,''), COALESCE(business,''), COALESCE(security_note,''),
-COALESCE(tags,'{}'), COALESCE(status,'active'), created_at::text, updated_at::text`
+COALESCE(array_to_json(tags), '[]'::json)::text, COALESCE(status,'active'), created_at::text, updated_at::text`
 
 func scanAllianceSystem(sc interface{ Scan(...any) error }, withCount bool) (*AllianceSystem, error) {
 	s := &AllianceSystem{}
+	var tagsJSON string
 	dest := []any{&s.ID, &s.Name, &s.URL, &s.OwnerUnit, &s.Platform, &s.Framework,
-		&s.Crypto, &s.Business, &s.SecurityNote, &s.Tags, &s.Status, &s.CreatedAt, &s.UpdatedAt}
+		&s.Crypto, &s.Business, &s.SecurityNote, &tagsJSON, &s.Status, &s.CreatedAt, &s.UpdatedAt}
 	if withCount {
 		dest = append(dest, &s.EndpointCount)
 	}
 	if err := sc.Scan(dest...); err != nil {
 		return nil, err
+	}
+	if tagsJSON != "" {
+		if err := json.Unmarshal([]byte(tagsJSON), &s.Tags); err != nil {
+			return nil, fmt.Errorf("联盟系统 #%d 标签解析失败: %w", s.ID, err)
+		}
+	}
+	if s.Tags == nil {
+		s.Tags = []string{}
 	}
 	return s, nil
 }
@@ -207,7 +217,7 @@ WHERE ($1 = '' OR sys.name ILIKE '%'||$1||'%' OR COALESCE(sys.url,'') ILIKE '%'|
        OR COALESCE(sys.framework,'') ILIKE '%'||$1||'%' OR COALESCE(sys.business,'') ILIKE '%'||$1||'%'
        OR COALESCE(sys.security_note,'') ILIKE '%'||$1||'%' OR COALESCE(sys.owner_unit,'') ILIKE '%'||$1||'%')
   AND ($2 = '' OR COALESCE(sys.platform,'') ILIKE '%'||$2||'%')
-  AND ($3 = '' OR COALESCE(sys.tags,'{}') @> ARRAY[$3]::text[])
+  AND ($3 = '' OR COALESCE(sys.tags,'{}')::text[] @> ARRAY[$3]::text[])
 ORDER BY sys.updated_at DESC, sys.id DESC`, q, platform, tag)
 	if err != nil {
 		return nil, err
@@ -270,7 +280,7 @@ func (s *AllianceStore) CreateAllianceSystem(in AllianceSystemInput) (int64, err
 	if err := tx.QueryRow(`
 INSERT INTO alliance_systems(name, url, owner_unit, platform, framework, crypto, business, security_note, tags, status)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::text[],$10) RETURNING id`,
-		in.Name, in.URL, in.OwnerUnit, in.Platform, in.Framework, in.Crypto, in.Business, in.SecurityNote, in.Tags, in.Status).Scan(&id); err != nil {
+		in.Name, in.URL, in.OwnerUnit, in.Platform, in.Framework, in.Crypto, in.Business, in.SecurityNote, marshalStringArray(in.Tags), in.Status).Scan(&id); err != nil {
 		return 0, err
 	}
 	if in.URL != "" {
@@ -294,7 +304,7 @@ UPDATE alliance_systems
 SET name=$2, url=$3, owner_unit=$4, platform=$5, framework=$6, crypto=$7,
     business=$8, security_note=$9, tags=$10::text[], status=$11, updated_at=now()
 WHERE id=$1`,
-		id, in.Name, in.URL, in.OwnerUnit, in.Platform, in.Framework, in.Crypto, in.Business, in.SecurityNote, in.Tags, in.Status)
+		id, in.Name, in.URL, in.OwnerUnit, in.Platform, in.Framework, in.Crypto, in.Business, in.SecurityNote, marshalStringArray(in.Tags), in.Status)
 	if err != nil {
 		return err
 	}
@@ -436,7 +446,7 @@ FROM findings f JOIN alliance_task_links l ON l.task_id=f.task_id`).
 	if out.Cryptos, err = s.allianceBuckets(`SELECT COALESCE(NULLIF(trim(crypto),''),'(未填)') AS label, count(*) FROM alliance_systems GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 12`); err != nil {
 		return nil, err
 	}
-	if out.Tags, err = s.allianceBuckets(`SELECT tag AS label, count(*) FROM alliance_systems, unnest(COALESCE(tags,'{}')) AS tag GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 20`); err != nil {
+	if out.Tags, err = s.allianceBuckets(`SELECT tag AS label, count(*) FROM alliance_systems, unnest(COALESCE(tags,'{}')::text[]) AS tag GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 20`); err != nil {
 		return nil, err
 	}
 	return out, nil
