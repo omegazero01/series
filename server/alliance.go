@@ -311,7 +311,9 @@ func (s *Server) resolveAllianceTargets(ids []int64) (assetIDs []int64, brief st
 const (
 	allianceBriefMaxSystems   = 10
 	allianceBriefMaxRunes     = 1500
-	allianceBriefFieldRunes   = 60
+	allianceBriefFieldRunes   = 60  // 框架/业务/登录：一句话摘要
+	allianceBriefNoteRunes    = 140 // 其他补充：测试账号、环境约束等必需信息
+	allianceBriefMwRunes      = 80  // 中间件/组件
 	allianceBriefHeaderPrefix = "【联盟系统情报】"
 )
 
@@ -355,37 +357,79 @@ func allianceBriefLine(n int, sys *db.AllianceSystem, eps []*db.AllianceEndpoint
 	if mainURL == "" && len(eps) > 0 {
 		mainURL = eps[0].URL
 	}
+	middleware, rest := allianceSplitSecurityNote(sys.SecurityNote)
 	parts := []string{fmt.Sprintf("%d) %s", n, sys.Name)}
-	if platform := allianceBriefField(sys.Platform); platform != "" {
+	if platform := allianceBriefClip(sys.Platform, allianceBriefFieldRunes); platform != "" {
 		parts = append(parts, "["+platform+"]")
 	}
 	if mainURL != "" {
 		parts = append(parts, mainURL)
 	}
-	if v := allianceBriefField(sys.Framework); v != "" {
+	if v := allianceBriefClip(sys.Framework, allianceBriefFieldRunes); v != "" {
 		parts = append(parts, "框架："+v)
 	}
-	if v := allianceBriefField(sys.Business); v != "" {
+	if v := allianceBriefClip(sys.Business, allianceBriefFieldRunes); v != "" {
 		parts = append(parts, "业务："+v)
 	}
-	if v := allianceBriefField(sys.Crypto); v != "" {
+	if v := allianceBriefClip(sys.Crypto, allianceBriefFieldRunes); v != "" {
 		parts = append(parts, "登录/加解密："+v)
 	}
-	if v := allianceBriefField(sys.SecurityNote); v != "" {
+	if v := allianceBriefClip(middleware, allianceBriefMwRunes); v != "" {
+		parts = append(parts, "中间件："+v)
+	}
+	if v := allianceBriefClip(rest, allianceBriefNoteRunes); v != "" {
 		parts = append(parts, "补充："+v)
 	}
 	return strings.Join(parts, "；")
 }
 
-// allianceBriefField flattens one field into a single short line.
-func allianceBriefField(raw string) string {
-	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\n", " "))
+// allianceSplitSecurityNote 拆开「中间件/组件：…」首行和其余补充内容。
+// 台账表单把中间件写在补充的第一行，中间件单独占位后，补充里的测试账号等
+// 必需信息才不会被中间件行吃掉全部预算。
+func allianceSplitSecurityNote(note string) (middleware, rest string) {
+	lines := strings.Split(strings.TrimSpace(note), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if middleware == "" {
+			if v, ok := strings.CutPrefix(line, "中间件/组件："); ok {
+				middleware = strings.TrimSpace(v)
+				continue
+			}
+			if v, ok := strings.CutPrefix(line, "中间件组件："); ok {
+				middleware = strings.TrimSpace(v)
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	return middleware, strings.Join(out, "；")
+}
+
+// allianceBriefClip 把任意字段压成单行，超长时按标点回退截断，避免把账号、
+// URL、包名从中间切断（原来硬切 60 字会把「测试账号 17500002236」切成
+// 「测试账号 1…」）。
+func allianceBriefClip(raw string, max int) string {
+	raw = strings.ReplaceAll(raw, "\r", "")
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\n", "；"))
 	if raw == "" {
 		return ""
 	}
 	runes := []rune(raw)
-	if len(runes) > allianceBriefFieldRunes {
-		return string(runes[:allianceBriefFieldRunes]) + "…"
+	if len(runes) <= max {
+		return raw
 	}
-	return raw
+	cut := runes[:max]
+	for i := len(cut) - 1; i >= max/2; i-- {
+		switch cut[i] {
+		case '；', ';', '，', ',', '。', '.', '、', ' ', '/', '（', '(':
+			if trimmed := strings.TrimRight(string(cut[:i]), "；;，,、 ）)"); trimmed != "" {
+				return trimmed + "…"
+			}
+		}
+	}
+	return string(cut) + "…"
 }
