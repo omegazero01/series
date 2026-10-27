@@ -94,6 +94,7 @@ type Worker struct {
 	// compression mechanism. Read per run, like nonStreaming. nil = off (built-in
 	// compaction).
 	noaEnabledFn func() bool
+	ctxPolicyFn  func() ContextPolicyConfig // resolver: 自定义上下文线(清理/摘要)，nil = 内置窗口推导
 	// maxTokensFn resolves the per-reply output cap in tokens, on the same
 	// per-run basis. nil or 0 = send no cap and let the endpoint decide.
 	maxTokensFn func() int
@@ -156,6 +157,12 @@ func (w *Worker) nonStreaming() bool { return w.nonStreamingFn != nil && w.nonSt
 // context-compression mechanism. nil/unset = off (built-in compaction). Read per
 // run so the settings toggle takes effect without rebuilding the agent.
 func (w *Worker) SetNoaEnabled(fn func() bool) { w.noaEnabledFn = fn }
+
+// SetContextPolicy wires a resolver returning the custom context lines (tool-result
+// clear line / history summary line). nil or all-zero = keep the SDK's window-derived
+// defaults, i.e. behaviour identical to before this feature. Read per run, so a
+// settings change takes effect on the next run without rebuilding the agent.
+func (w *Worker) SetContextPolicy(fn func() ContextPolicyConfig) { w.ctxPolicyFn = fn }
 
 // SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
@@ -656,6 +663,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
 	noaSession := WorkerSessionID(ts.ID(), intent.ID)
 	enableNoa(&opts, w.noaEnabledFn, w.workDir, noaSession, noaWarn(noaSession))
+	// 自定义上下文线（清理/摘要），未配置时保持内置窗口推导。
+	applyContextPolicy(&opts, w.ctxPolicyFn, w.compactionWindow())
 	ctx = attachSideCapture(ctx, &opts)
 	s, closeSession, err := newSession(opts)
 	if err != nil {

@@ -447,6 +447,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetNonStreaming(nonStreamingResolver(wCfg))   // 该 profile 选非流式时走 Provider.Complete
 	wk.SetMaxTokens(maxTokensResolver(wCfg))         // 单次回复输出上限(0 = 不发)
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)       // 实验功能:noa 上下文压缩(每 run 读)
+	wk.SetContextPolicy(s.m.ContextPolicyConfig)     // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.findingRecorder())
@@ -458,6 +459,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetNonStreaming(nonStreamingResolver(pCfg))    // 该 profile 选非流式时走 Provider.Complete
 	pl.SetMaxTokens(maxTokensResolver(pCfg))          // 单次回复输出上限(0 = 不发)
 	pl.SetNoaEnabled(s.m.NoaCompactionEnabled)        // 实验功能:noa 上下文压缩(每 run 读)
+	pl.SetContextPolicy(s.m.ContextPolicyConfig)      // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	pl.SetOverviewProfile(s.plannerOverviewProfile)   // 实验功能:Planner 态势窗口 full/lean(每轮读)
 	pl.SetOverviewConfig(s.plannerOverviewConfig)     // 实验功能:可编辑的完整/精简数值(每轮读)
 	// cold-digest §7: background cold-node compaction, on the planner's provider/
@@ -556,7 +558,8 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent.SetCancelIntent(s.cancelIntentFromMain)
 	s.mainAgent.SetNonStreaming(nonStreamingResolver(mCfg))
 	s.mainAgent.SetMaxTokens(maxTokensResolver(mCfg))
-	s.mainAgent.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
+	s.mainAgent.SetNoaEnabled(s.m.NoaCompactionEnabled)   // 实验功能:noa 上下文压缩(每 run 读)
+	s.mainAgent.SetContextPolicy(s.m.ContextPolicyConfig) // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
@@ -565,7 +568,8 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.chatAgent.SetGuard(s.chatGuard())
 	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
 	s.chatAgent.SetMaxTokens(maxTokensResolver(cfg))
-	s.chatAgent.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
+	s.chatAgent.SetNoaEnabled(s.m.NoaCompactionEnabled)   // 实验功能:noa 上下文压缩(每 run 读)
+	s.chatAgent.SetContextPolicy(s.m.ContextPolicyConfig) // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	s.llmProv = prov
 	s.llmCfg = cfg
 	s.llmOn = true
@@ -776,7 +780,8 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	ca.SetGuard(s.chatGuard())
 	ca.SetNonStreaming(nonStreamingResolver(cfg))
 	ca.SetMaxTokens(maxTokensResolver(cfg))
-	ca.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
+	ca.SetNoaEnabled(s.m.NoaCompactionEnabled)   // 实验功能:noa 上下文压缩(每 run 读)
+	ca.SetContextPolicy(s.m.ContextPolicyConfig) // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	s.profMu.Lock()
 	if ex := s.profChatAgents[id]; ex != nil { // lost the race → keep the winner
 		ca = ex
@@ -3540,6 +3545,9 @@ func (s *Server) settingsPayload() map[string]any {
 		// 的 graph_overview 投影;图/权限/审计/UI 不变。
 		"planner_overview_mode":   s.m.PlannerOverviewMode(),
 		"planner_overview_config": s.m.PlannerOverviewConfig(),
+		// 上下文压缩的两条线（清理线=无损、摘要线=有损）。零值=用内置窗口推导；
+		// 每 run 读一次，保存后对之后启动的 run 生效。
+		"context_policy_config": s.m.ContextPolicyConfig(),
 	}
 }
 
@@ -3598,6 +3606,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		PlannerOverviewMode *string `json:"planner_overview_mode"`
 		// Planner 态势窗口的完整/精简数值；每轮读，无需重建 agent。
 		PlannerOverviewConfig *agent.OverviewConfig `json:"planner_overview_config"`
+		// 上下文压缩的两条线（清理线=无损可回读、摘要线=有损）。零值字段=用内置
+		// 窗口推导；每 run 读一次，保存后对之后启动的 run 生效，无需重建 LLM 链。
+		ContextPolicyConfig *agent.ContextPolicyConfig `json:"context_policy_config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3640,6 +3651,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if req.PlannerOverviewConfig != nil {
 		// 每轮读取；保存后下一轮生效，无需 applyLLM 重建。
 		if err := s.m.SetPlannerOverviewConfig(*req.PlannerOverviewConfig); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	if req.ContextPolicyConfig != nil {
+		// 每 run 读取；保存后对之后启动的 run 生效，无需 applyLLM 重建。
+		if err := s.m.SetContextPolicyConfig(*req.ContextPolicyConfig); err != nil {
 			writeErr(w, 400, err.Error())
 			return
 		}

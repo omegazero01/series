@@ -568,6 +568,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
 	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)     // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
+	wk.SetContextPolicy(s.m.ContextPolicyConfig)   // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())
 	wk.SetTrafficRecording(s.m.TrafficEnabled())
@@ -581,6 +582,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)
 	pl.SetMaxTokens(plannerRuntime.maxTokens)
 	pl.SetNoaEnabled(s.m.NoaCompactionEnabled)      // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
+	pl.SetContextPolicy(s.m.ContextPolicyConfig)    // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	pl.SetOverviewProfile(s.plannerOverviewProfile) // 实验功能:Planner 态势窗口 full/lean(每轮读)
 	pl.SetOverviewConfig(s.plannerOverviewConfig)   // 实验功能:可编辑的完整/精简数值(每轮读)
 	pl.SetKillWork(s.engine.KillWork)
@@ -604,6 +606,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())
 	main.SetSmartProxy(s.m.smart) // 智能代理：per-task 主 agent 可标记被拦截主机
 	main.SetNoaEnabled(s.m.NoaCompactionEnabled)
+	main.SetContextPolicy(s.m.ContextPolicyConfig) // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
 	main.SetCancelIntent(s.cancelIntentFromMain)

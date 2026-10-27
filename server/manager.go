@@ -335,6 +335,9 @@ const (
 	// Planner 态势窗口的完整/精简数值。存 JSON，零值表示使用内置默认值；
 	// 每轮读取，修改在下一轮规划生效。
 	settingPlannerOverviewConfig = "planner_overview_config"
+	// 上下文压缩的两条线（工具输出清理线 / 历史摘要线）。存 JSON，零值=用内置
+	// 窗口推导；每 run 读一次，对之后启动的 run 生效。
+	settingContextPolicyConfig = "context_policy_config"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
 	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
@@ -787,6 +790,45 @@ func (m *Manager) SetPlannerOverviewConfig(cfg agent.OverviewConfig) error {
 		return err
 	}
 	return m.pg.SetSetting(settingPlannerOverviewConfig, string(raw))
+}
+
+// ContextPolicyConfig returns the custom context-compression lines (tool-result
+// clear line / history summary line). Missing, corrupt or env-locked values fall
+// back to the built-in window-derived defaults, so an unconfigured install keeps
+// the exact previous behaviour. When SERIES_CONTEXT_POLICY is set (isolated
+// benchmark) custom values are ignored so an A/B run is deterministic.
+func (m *Manager) ContextPolicyConfig() agent.ContextPolicyConfig {
+	if agent.ContextPolicyEnvLocked() {
+		return agent.DefaultContextPolicyConfig()
+	}
+	if m.pg == nil {
+		return agent.DefaultContextPolicyConfig()
+	}
+	raw, ok, err := m.pg.GetSetting(settingContextPolicyConfig)
+	if err != nil || !ok {
+		return agent.DefaultContextPolicyConfig()
+	}
+	cfg, _ := agent.ParseContextPolicy(raw)
+	return cfg
+}
+
+// SetContextPolicyConfig validates and persists the custom lines. Agents read the
+// normalized value once per run, so a change applies to the next run without
+// rebuilding the LLM chain.
+func (m *Manager) SetContextPolicyConfig(cfg agent.ContextPolicyConfig) error {
+	if err := agent.ValidateContextPolicyConfig(cfg); err != nil {
+		return err
+	}
+	cfg = cfg.Normalize()
+	if cfg.IsZero() {
+		// 全零 = 恢复内置默认：直接清掉设置键，避免留下一个"看着像配置"的空对象。
+		return m.pg.SetSetting(settingContextPolicyConfig, "")
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return m.pg.SetSetting(settingContextPolicyConfig, string(raw))
 }
 
 // LLMPoolEnabled reports whether LLM failover ("轮询") is on (默认关；
