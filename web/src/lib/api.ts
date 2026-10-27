@@ -16,12 +16,15 @@ import {
   toolCallURL,
 } from "@/lib/tool-calls";
 import type {
-  FindingSuppressionRule,
   ActiveFindingRetest,
   Activity,
   Agent,
   AgentDetail,
   AgentTrigger,
+  AllianceEndpoint,
+  AllianceStats,
+  AllianceSystem,
+  AllianceSystemInput,
   ArchiveBatchItem,
   Asset,
   Audit,
@@ -51,11 +54,12 @@ import type {
   FindingRetest,
   FindingStats,
   FindingStatus,
-  TaskFindingFilters,
+  FindingSuppressionRule,
   FindingsPage,
   FindingTraffic,
   FindingTrafficDetail,
   GlobalProxyProbeResult,
+  HTTPAuthSettings,
   IntentAsset,
   InterceptApprovalFilter,
   InterceptApprovalRow,
@@ -82,11 +86,10 @@ import type {
   PromptVersion,
   SessionTokenUsage,
   Settings,
-  HTTPAuthSettings,
-  SmartProxyHost,
   Severity,
   SkillCall,
   SkillItem,
+  SmartProxyHost,
   Stats,
   Task,
   TaskArchive,
@@ -97,6 +100,7 @@ import type {
   TaskAssetScopeMutation,
   TaskCategory,
   TaskConstraint,
+  TaskFindingFilters,
   TaskGoal,
   TaskLLMResolutions,
   TaskNode,
@@ -251,6 +255,7 @@ export const api = {
     sourceTaskIds?: string[];
     companyIds?: number[];
     assetIds?: number[];
+    allianceSystemIds?: number[];
     timeoutSeconds?: number;
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
@@ -265,6 +270,7 @@ export const api = {
       source_task_ids: input.sourceTaskIds ?? [],
       company_ids: input.companyIds ?? [],
       asset_ids: input.assetIds ?? [],
+      alliance_system_ids: input.allianceSystemIds ?? [],
       asset_approval_template: input.assetApprovalTemplate ?? "all_assets",
       timeout_seconds: input.timeoutSeconds ?? 0,
       seed_first_intent: input.seedFirstIntent ?? false,
@@ -443,6 +449,25 @@ export const api = {
     get<Record<string, number>>(`/assets/counts${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
   deleteAssets: (ids: number[]) =>
     http<{ deleted: number }>("/assets", { method: "DELETE", body: JSON.stringify({ ids }) }),
+
+  // ---- 联盟系统台账（fork-only: feat/alliance-system）----
+  // 列表（q/platform/tag 过滤）；统计；简报预览（与新建任务时写入的文本一致）。
+  allianceSystems: (q = "", platform = "", tag = "") =>
+    get<{ systems: AllianceSystem[] }>(
+      `/alliance/systems?q=${encodeURIComponent(q)}&platform=${encodeURIComponent(platform)}&tag=${encodeURIComponent(tag)}`,
+    ).then((r) => r?.systems ?? []),
+  allianceSystem: (id: number) =>
+    get<{ system: AllianceSystem; endpoints: AllianceEndpoint[] }>(`/alliance/systems/${id}`),
+  createAllianceSystem: (input: AllianceSystemInput) => post<{ id: number }>("/alliance/systems", input),
+  updateAllianceSystem: (id: number, input: AllianceSystemInput) =>
+    patch<{ ok: boolean }>(`/alliance/systems/${id}`, input),
+  deleteAllianceSystem: (id: number) => del<{ ok: boolean }>(`/alliance/systems/${id}`),
+  addAllianceEndpoint: (id: number, input: { url: string; note?: string }) =>
+    post<{ id: number }>(`/alliance/systems/${id}/endpoints`, input),
+  deleteAllianceEndpoint: (id: number, endpointId: number) =>
+    del<{ ok: boolean }>(`/alliance/systems/${id}/endpoints/${endpointId}`),
+  allianceStats: () => get<AllianceStats>("/alliance/stats"),
+  allianceBrief: (ids: number[]) => get<{ brief: string }>(`/alliance/brief?ids=${ids.join(",")}`),
   // task-scoped view of the same endpoint — server-side paginated like `assets`
   taskAssets: (taskId: string, type = "", limit = 50, offset = 0, tested = "all", approval = "all") =>
     get<{ count: number; total: number; assets: Asset[] }>(
@@ -529,7 +554,13 @@ export const api = {
   findings: (task?: string) => get<Finding[]>(`/exploration/findings${tq(task)}`).then(arr),
   taskLegacyFinding: (task: string, node: string) =>
     get<Finding>(`/exploration/findings?${new URLSearchParams({ context_task: task, legacy_node: node })}`),
-  taskFindingsPage: (task: string, page: number, pageSize: number, direction: "asc" | "desc", filters: TaskFindingFilters = {}) =>
+  taskFindingsPage: (
+    task: string,
+    page: number,
+    pageSize: number,
+    direction: "asc" | "desc",
+    filters: TaskFindingFilters = {},
+  ) =>
     get<FindingsPage>(
       `/exploration/findings?${new URLSearchParams({ context_task: task, page: String(page), limit: String(pageSize), direction, q: filters.query ?? "", status: filters.status ?? "all", severity: filters.severity ?? "all", scope: filters.scope ?? "all" })}`,
     ),
@@ -685,9 +716,14 @@ export const api = {
   deleteFinding: (id: string, reason?: string) =>
     del<{ deleted: boolean; id: number }>(`/exploration/findings/${id}`, reason === undefined ? undefined : { reason }),
   findingSuppressionRules: (taskId: string, before = 0) =>
-    get<{ items: FindingSuppressionRule[]; has_more: boolean; next_before: number }>(`/tasks/${encodeURIComponent(taskId)}/finding-suppression-rules?before=${before}`),
+    get<{ items: FindingSuppressionRule[]; has_more: boolean; next_before: number }>(
+      `/tasks/${encodeURIComponent(taskId)}/finding-suppression-rules?before=${before}`,
+    ),
   revokeFindingSuppression: (taskId: string, ruleId: string) =>
-    post<{ revoked: boolean }>(`/tasks/${encodeURIComponent(taskId)}/finding-suppression-rules/${encodeURIComponent(ruleId)}/revoke`, {}),
+    post<{ revoked: boolean }>(
+      `/tasks/${encodeURIComponent(taskId)}/finding-suppression-rules/${encodeURIComponent(ruleId)}/revoke`,
+      {},
+    ),
   findingRetests: (id: string) =>
     get<{ retests: FindingRetest[] }>(`/exploration/findings/${encodeURIComponent(id)}/retests`).then((r) =>
       arr(r.retests),
@@ -852,7 +888,8 @@ export const api = {
   trafficDeleteAll: () => del<{ deleted: number; reclaimed: number }>(`/traffic/all`),
 
   httpAuthSettings: () => get<HTTPAuthSettings>("/settings/http-auth"),
-  saveHTTPAuthSettings: (value: { enabled: boolean; username: string; password: string }) => put<HTTPAuthSettings>("/settings/http-auth", value),
+  saveHTTPAuthSettings: (value: { enabled: boolean; username: string; password: string }) =>
+    put<HTTPAuthSettings>("/settings/http-auth", value),
 
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),
@@ -867,10 +904,9 @@ export const api = {
     }),
   // 删除一条智能代理标记（按任务 + 主机定位）。
   deleteSmartProxyHost: (taskId: number, host: string) =>
-    http<{ ok: boolean }>(
-      `/settings/smart-proxy/hosts?task_id=${taskId}&host=${encodeURIComponent(host)}`,
-      { method: "DELETE" },
-    ),
+    http<{ ok: boolean }>(`/settings/smart-proxy/hosts?task_id=${taskId}&host=${encodeURIComponent(host)}`, {
+      method: "DELETE",
+    }),
   // Run a real "test" search with the given (or saved) config to verify it works.
   testWebSearch: (patch: {
     web_search_backend?: string;
@@ -1131,8 +1167,24 @@ export const api = {
     >,
   ) => put<{ ok: boolean }>(`/tools/custom/${key}`, t),
   deleteCustomTool: (key: string) => del<{ deleted: string }>(`/tools/custom/${key}`),
-  testCustomTool: (body: { kind: string; exec: Record<string, unknown>; params: Record<string, unknown>; key?: string; executable?: string; directory?: string; action?: "check" | "run"; command?: string }, signal?: AbortSignal) =>
-    http<{ output: string; is_error: boolean; duration_ms?: number }>("/tools/custom/test", { method: "POST", body: JSON.stringify(body), signal }),
+  testCustomTool: (
+    body: {
+      kind: string;
+      exec: Record<string, unknown>;
+      params: Record<string, unknown>;
+      key?: string;
+      executable?: string;
+      directory?: string;
+      action?: "check" | "run";
+      command?: string;
+    },
+    signal?: AbortSignal,
+  ) =>
+    http<{ output: string; is_error: boolean; duration_ms?: number }>("/tools/custom/test", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal,
+    }),
   detectPython: () => post<{ python_interpreter: string }>("/settings/python/detect", {}),
 
   // ---- mcp ----

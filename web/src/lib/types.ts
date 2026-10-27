@@ -1593,7 +1593,11 @@ export interface InterceptExecution {
   items: Activity[];
 }
 
-export interface HTTPAuthSettings { enabled: boolean; username: string; password_set: boolean; }
+export interface HTTPAuthSettings {
+  enabled: boolean;
+  username: string;
+  password_set: boolean;
+}
 
 export interface FindingSuppressionRule {
   id: string;
@@ -1607,4 +1611,63 @@ export interface FindingSuppressionRule {
   reason: string;
   created_at: string;
   revoked_at?: string;
+}
+
+// ---- 联盟系统（fork-only: feat/alliance-system，城商行联盟定制）----
+export interface AllianceSystem {
+  id: number;
+  name: string;
+  url: string;
+  owner_unit: string;
+  platform: string;
+  framework: string;
+  crypto: string;
+  business: string;
+  security_note: string;
+  tags: string[];
+  status: string;
+  created_at: string;
+  updated_at: string;
+  endpoint_count: number;
+}
+
+export interface AllianceEndpoint {
+  id: number;
+  system_id: number;
+  url: string;
+  host: string;
+  port?: number;
+  scheme: string;
+  note: string;
+  asset_id?: number;
+}
+
+export interface AllianceBucket {
+  label: string;
+  count: number;
+}
+
+export interface AllianceStats {
+  systems: number;
+  endpoints: number;
+  covered: number;
+  tasks: number;
+  findings: { critical: number; high: number; medium: number; low: number };
+  platforms: AllianceBucket[];
+  frameworks: AllianceBucket[];
+  cryptos: AllianceBucket[];
+  tags: AllianceBucket[];
+}
+
+export interface AllianceSystemInput {
+  name: string;
+  url: string;
+  owner_unit: string;
+  platform: string;
+  framework: string;
+  crypto: string;
+  business: string;
+  security_note: string;
+  tags: string[];
+  status: string;
 }

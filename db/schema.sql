@@ -1716,3 +1716,46 @@ CREATE TABLE IF NOT EXISTS finding_suppression_rules (
 );
 CREATE INDEX IF NOT EXISTS idx_finding_suppression_task ON finding_suppression_rules(task_id,id DESC);
 ALTER TABLE finding_suppression_rules ADD COLUMN IF NOT EXISTS targets JSONB NOT NULL DEFAULT '[]';
+
+-- ───────────────────────────────────────────────────────────────────────────
+-- fork-only: 联盟系统（城商行联盟定制，feat/alliance-system，不合并上游）
+-- 3 张加法表；入口在新建任务时解析成标准资产（assets），这里只存情报与关联。
+-- ───────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS alliance_systems (
+    id            BIGSERIAL PRIMARY KEY,
+    name          TEXT NOT NULL,
+    url           TEXT NOT NULL DEFAULT '',
+    owner_unit    TEXT NOT NULL DEFAULT '',
+    platform      TEXT NOT NULL DEFAULT '',
+    framework     TEXT NOT NULL DEFAULT '',
+    crypto        TEXT NOT NULL DEFAULT '',
+    business      TEXT NOT NULL DEFAULT '',
+    security_note TEXT NOT NULL DEFAULT '',
+    tags          TEXT[] NOT NULL DEFAULT '{}',
+    status        TEXT NOT NULL DEFAULT 'active',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_alliance_systems_updated ON alliance_systems(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS alliance_endpoints (
+    id         BIGSERIAL PRIMARY KEY,
+    system_id  BIGINT NOT NULL REFERENCES alliance_systems(id) ON DELETE CASCADE,
+    url        TEXT NOT NULL,
+    host       TEXT NOT NULL DEFAULT '',
+    port       INTEGER,
+    scheme     TEXT NOT NULL DEFAULT '',
+    note       TEXT NOT NULL DEFAULT '',
+    asset_id   BIGINT REFERENCES assets(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alliance_endpoints_system_url ON alliance_endpoints(system_id, url);
+CREATE INDEX IF NOT EXISTS idx_alliance_endpoints_system ON alliance_endpoints(system_id, id);
+
+CREATE TABLE IF NOT EXISTS alliance_task_links (
+    task_id    BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    system_id  BIGINT NOT NULL REFERENCES alliance_systems(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, system_id)
+);
+CREATE INDEX IF NOT EXISTS idx_alliance_task_links_system ON alliance_task_links(system_id);
