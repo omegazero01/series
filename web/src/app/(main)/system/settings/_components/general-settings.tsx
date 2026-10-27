@@ -8,6 +8,7 @@ import {
   FlaskConicalIcon,
   GlobeIcon,
   KeyboardIcon,
+  LayersIcon,
   Loader2Icon,
   RadioTowerIcon,
   SearchIcon,
@@ -26,7 +27,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
-import type { GlobalProxyProbeResult, PlannerOverviewConfig, PlannerOverviewLimits, Settings } from "@/lib/types";
+import type { ContextPolicyConfig, GlobalProxyProbeResult, PlannerOverviewConfig, PlannerOverviewLimits, Settings } from "@/lib/types";
 
 import { HTTPAuthCard } from "./http-auth-card";
 
@@ -50,6 +51,68 @@ const DEFAULT_PLANNER_OVERVIEW_CONFIG: PlannerOverviewConfig = {
     cold_digests: 3,
   },
 };
+
+// 上下文压缩表单字段。全部允许 0/留空 = 沿用底座默认，服务端会做范围校验。
+const CONTEXT_POLICY_FIELDS: Array<{
+  key: keyof ContextPolicyConfig;
+  label: string;
+  description: string;
+  min: number;
+  max: number;
+  step: number;
+}> = [
+  {
+    key: "clear_after_tokens",
+    label: "工具输出清理线（token）",
+    description: "超过这条线后，开始把旧的命令/网页/文件输出正文换成占位符（无损，可重新读取）。",
+    min: 20000,
+    max: 600000,
+    step: 10000,
+  },
+  {
+    key: "keep_recent_tool_results",
+    label: "保留最近工具结果（条）",
+    description: "清理时始终保留原文的最近工具结果条数；底座默认 5。",
+    min: 1,
+    max: 50,
+    step: 1,
+  },
+  {
+    key: "summary_after_tokens",
+    label: "历史摘要线（token）",
+    description: "超过这条线后，把更早的历史摘要成一段文字（有损、不可逆）。必须大于清理线。",
+    min: 40000,
+    max: 900000,
+    step: 10000,
+  },
+  {
+    key: "keep_recent_messages",
+    label: "保留最近消息（条）",
+    description: "摘要时始终保留、不参与摘要的最近消息条数；底座默认 8。",
+    min: 2,
+    max: 50,
+    step: 1,
+  },
+];
+
+// 预设按"实测会话峰值"给三档：会话峰值中位 7.6 万、p90 14.3 万（近 669 个 worker 会话）。
+const CONTEXT_POLICY_PRESETS: Array<{ label: string; hint: string; value: ContextPolicyConfig }> = [
+  {
+    label: "精简（省钱）",
+    hint: "清理 6 万 / 摘要 18 万：约 30% 的长会话会被摘要一次",
+    value: { clear_after_tokens: 60000, keep_recent_tool_results: 4, summary_after_tokens: 180000, keep_recent_messages: 8 },
+  },
+  {
+    label: "标准（推荐）",
+    hint: "清理 12 万 / 摘要 30 万：约 6% 的长会话会被摘要",
+    value: { clear_after_tokens: 120000, keep_recent_tool_results: 5, summary_after_tokens: 300000, keep_recent_messages: 8 },
+  },
+  {
+    label: "宽松",
+    hint: "清理 24 万 / 摘要 60 万：只有极少数超长会话会被摘要",
+    value: { clear_after_tokens: 240000, keep_recent_tool_results: 8, summary_after_tokens: 600000, keep_recent_messages: 8 },
+  },
+];
 
 type PlannerLimitKey = keyof PlannerOverviewLimits;
 
@@ -183,6 +246,9 @@ export default function SystemSettingsPage() {
   const [plannerOverviewConfig, setPlannerOverviewConfig] = React.useState<PlannerOverviewConfig>(DEFAULT_PLANNER_OVERVIEW_CONFIG);
   const [showPlannerAdvanced, setShowPlannerAdvanced] = React.useState(false);
   const [savingPlannerConfig, setSavingPlannerConfig] = React.useState(false);
+  // 上下文压缩两条线（清理线/摘要线）与保留条数；空对象 = 全部沿用底座默认。
+  const [contextPolicy, setContextPolicy] = React.useState<ContextPolicyConfig>({});
+  const [savingContextPolicy, setSavingContextPolicy] = React.useState(false);
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
 
@@ -216,6 +282,7 @@ export default function SystemSettingsPage() {
     setNoaCompaction(!!s.noa_compaction);
     setPlannerOverviewMode(s.planner_overview_mode === "lean" ? "lean" : "full");
     setPlannerOverviewConfig(normalizePlannerOverviewConfig(s.planner_overview_config));
+    setContextPolicy(s.context_policy_config ?? {});
   }, []);
 
   const saveWorkers = () => {
@@ -411,6 +478,32 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => toast.error(`保存失败：${(e as Error).message}`))
       .finally(() => setSavingPlannerConfig(false));
+  };
+
+  const updateContextPolicy = (key: keyof ContextPolicyConfig, value: number) => {
+    setContextPolicy((prev) => ({ ...prev, [key]: Number.isFinite(value) ? value : 0 }));
+  };
+
+  const applyContextPolicyPreset = (value: ContextPolicyConfig) => {
+    setContextPolicy({ ...value });
+    toast.info("已填入预设数值；点“保存”后对之后启动的 run 生效");
+  };
+
+  const resetContextPolicy = () => {
+    setContextPolicy({});
+    toast.info("已清空自定义（= 底座默认）；点“保存”后生效");
+  };
+
+  const saveContextPolicy = () => {
+    setSavingContextPolicy(true);
+    api
+      .setSettings({ context_policy_config: contextPolicy })
+      .then((s) => {
+        apply(s);
+        toast.success("已保存上下文压缩配置（对之后启动的 run 生效）");
+      })
+      .catch((e) => toast.error(`保存失败：${(e as Error).message}`))
+      .finally(() => setSavingContextPolicy(false));
   };
 
   // Persist a web-search patch (enable and/or backend). Optimistic with refetch.
@@ -1024,6 +1117,82 @@ export default function SystemSettingsPage() {
                 </div>
               </div>
             ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <LayersIcon className="size-4" />
+              上下文压缩（清理线 / 摘要线）
+            </CardTitle>
+            <CardDescription>
+              控制四类 Agent（Planner / Worker / 主控 / 对话）在长会话里<b>什么时候开始压缩上下文</b>。
+              底座默认把两条线都绑在模型窗口上：工具输出清理 = 有效窗口 × 60%，历史摘要 = 有效窗口 −
+              缓冲（1.3 万 / 3 万 / 5 万按窗口分档）。窗口按 1M 配置时，两条线分别被推到约
+              <b>59.5 万 / 94.2 万</b> token——实测没有会话能碰到，等于这两个机制不生效。这里可以把它们改成固定值。
+              <span className="mt-2 block">
+                <b>工具输出清理（无损）</b>：超过清理线后，把"保留条数"之外的旧命令 / 网页 / 文件输出正文换成
+                占位符；正文仍可重新读取，不影响证据。<b>历史摘要（有损）</b>：超过摘要线后，把更早的历史换成一段
+                摘要，不可逆。清理线必须小于摘要线。
+              </span>
+              <span className="mt-2 block">
+                保存后对<b>之后启动的 run</b>生效：运行中的会话不换策略，避免中途改写历史打断提示缓存。所有字段
+                留空或 0 = 沿用底座默认（窗口推导）。
+              </span>
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              {CONTEXT_POLICY_PRESETS.map((preset) => (
+                <Button
+                  key={preset.label}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  title={preset.hint}
+                  onClick={() => applyContextPolicyPreset(preset.value)}
+                  disabled={!loaded || savingContextPolicy}
+                >
+                  {preset.label}
+                </Button>
+              ))}
+              <span className="text-[11px] text-muted-foreground">
+                预设只是填入数值，仍需点"保存"；鼠标悬停看每档的摘要触发比例
+              </span>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {CONTEXT_POLICY_FIELDS.map((field) => (
+                <div key={field.key} className="space-y-1.5">
+                  <Label htmlFor={`context-policy-${field.key}`} className="font-normal text-muted-foreground text-xs">
+                    {field.label}
+                  </Label>
+                  <Input
+                    id={`context-policy-${field.key}`}
+                    type="number"
+                    min={field.min}
+                    max={field.max}
+                    step={field.step}
+                    value={contextPolicy[field.key] ?? 0}
+                    disabled={!loaded || savingContextPolicy}
+                    onChange={(e) => updateContextPolicy(field.key, Number(e.target.value))}
+                  />
+                  <p className="text-[11px] text-muted-foreground">{field.description}</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    范围 {field.min}–{field.max}；0 = 沿用底座默认
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" size="sm" onClick={saveContextPolicy} disabled={!loaded || savingContextPolicy}>
+                {savingContextPolicy ? <Loader2Icon className="size-4 animate-spin" /> : null}
+                保存
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={resetContextPolicy} disabled={!loaded || savingContextPolicy}>
+                恢复底座默认（全清空）
+              </Button>
+            </div>
           </CardContent>
         </Card>
 

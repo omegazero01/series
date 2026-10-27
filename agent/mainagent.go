@@ -34,6 +34,7 @@ type MainAgent struct {
 	cancelIntent    IntentStopper                          // user cancellation, shared with the UI
 	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	ctxPolicyFn     func() ContextPolicyConfig             // resolver: 自定义上下文线(清理/摘要)，nil = 内置窗口推导
 	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 	// smart backs mark_host_proxy / check_host_proxy. Nil = feature off.
 	smart SmartProxyView
@@ -43,6 +44,12 @@ type MainAgent struct {
 // context-compression mechanism. nil/unset = off (built-in compaction). Read per
 // run so the settings toggle takes effect without rebuilding the agent.
 func (m *MainAgent) SetNoaEnabled(fn func() bool) { m.noaEnabledFn = fn }
+
+// SetContextPolicy wires a resolver returning the custom context lines (tool-result
+// clear line / history summary line). nil or all-zero = keep the SDK's window-derived
+// defaults, i.e. behaviour identical to before this feature. Read per run, so a
+// settings change takes effect on the next run without rebuilding the agent.
+func (m *MainAgent) SetContextPolicy(fn func() ContextPolicyConfig) { m.ctxPolicyFn = fn }
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
 // model path (true = non-streaming). nil/unset = streaming (default).
@@ -222,6 +229,8 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		noaSession = fmt.Sprintf("exp%d-main-s%d", ts.ID(), mainSeg)
 	}
 	enableNoa(&opts, m.noaEnabledFn, m.workDir, noaSession, noaWarn(noaSession))
+	// 自定义上下文线（清理/摘要），未配置时保持内置窗口推导。
+	applyContextPolicy(&opts, m.ctxPolicyFn, m.compactionWindow())
 	ctx = attachSideCapture(ctx, &opts)
 	s, closeSession, err := newSession(opts)
 	if err != nil {

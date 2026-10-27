@@ -39,6 +39,7 @@ type Planner struct {
 	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
 	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	ctxPolicyFn       func() ContextPolicyConfig             // resolver: 自定义上下文线(清理/摘要)，nil = 内置窗口推导
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 	overviewProfileFn func() OverviewProfile                 // resolver: full/lean situation projection (nil = full)
 	overviewConfigFn  func() OverviewConfig                  // resolver: editable per-profile limits (nil = defaults)
@@ -99,6 +100,12 @@ func (p *Planner) nonStreaming() bool { return p.nonStreamingFn != nil && p.nonS
 // context-compression mechanism. nil/unset = off (built-in compaction). Read per
 // run so the settings toggle takes effect without rebuilding the agent.
 func (p *Planner) SetNoaEnabled(fn func() bool) { p.noaEnabledFn = fn }
+
+// SetContextPolicy wires a resolver returning the custom context lines (tool-result
+// clear line / history summary line). nil or all-zero = keep the SDK's window-derived
+// defaults, i.e. behaviour identical to before this feature. Read per run, so a
+// settings change takes effect on the next run without rebuilding the agent.
+func (p *Planner) SetContextPolicy(fn func() ContextPolicyConfig) { p.ctxPolicyFn = fn }
 
 // SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
@@ -515,6 +522,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
 	noaSession := fmt.Sprintf("exp%d-planner", ts.ID())
 	enableNoa(&opts, p.noaEnabledFn, p.workDir, noaSession, noaWarn(noaSession))
+	// 自定义上下文线（清理/摘要），未配置时保持内置窗口推导。
+	applyContextPolicy(&opts, p.ctxPolicyFn, p.compactionWindow())
 	lead := "本轮有变动；先按图引导中的事件与相关记录缩小检索范围，再决定下一步。"
 	if len(triggers) == 0 {
 		lead = "本轮没有具体节点变动信号。按需读取目标与提示；心跳提供的少量运行中意图可用于监督，未展示不代表不存在。"

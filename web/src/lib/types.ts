@@ -981,6 +981,15 @@ export interface PlannerOverviewConfig {
   lean: PlannerOverviewLimits;
 }
 
+// 上下文压缩的两条线（单位 token）。字段留空或 0 = 沿用底座按窗口推导的默认值。
+// clear_* 是无损的工具输出清理线（正文可重新读取）；summary_* 是有损的历史摘要线。
+export interface ContextPolicyConfig {
+  clear_after_tokens?: number;
+  keep_recent_tool_results?: number;
+  summary_after_tokens?: number;
+  keep_recent_messages?: number;
+}
+
 export interface Settings {
   traffic_capture: boolean;
   agent_traffic_binding: boolean; // Agent 自动绑定流量证据，默认关闭；不影响人工绑定
@@ -1040,6 +1049,9 @@ export interface Settings {
   planner_overview_mode?: "full" | "lean";
   // 完整/精简两套可编辑数值；缺省字段由服务端回退到内置默认值。
   planner_overview_config?: PlannerOverviewConfig;
+  // 上下文压缩两条线（清理线/摘要线）与保留条数；缺省或 0 字段由服务端回退到
+  // 底座按窗口推导的默认值。每 run 读一次，保存后对之后启动的 run 生效。
+  context_policy_config?: ContextPolicyConfig;
 }
 
 export interface SmartProxyHost {
