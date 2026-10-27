@@ -13,15 +13,15 @@ import (
 func TestAllianceBriefKeepsFullFields(t *testing.T) {
 	sys := &db.AllianceSystem{
 		ID:        8,
-		Name:      "潍坊银行综合积分权益平台托管系统",
+		Name:      "某某银行综合积分权益平台托管系统",
 		URL:       "https://ttt.ebanktest.com.cn:18248/html/10124/view/login/login.html",
 		Platform:  "Web",
-		Framework: "SSH（Struts2+Spring+Hibernate）；商城 H5 用 uniapp；微服务 Dubbo+Zookeeper；优讯产品 + 行内定制",
+		Framework: "SSH（Struts2+Spring+Hibernate）；商城 H5 用 uniapp；微服务 Dubbo+Zookeeper；自有产品 + 行内定制",
 		Crypto:    "账号+口令登录（商城端、商户端两套入口）；是否前端加密/验证码/token 机制未说明，测试时确认",
 		Business:  "面向行内及外行客户的权益/会员/积分商城平台：积分体系、权益商城、活动与拼团裂变、会员成长、网点积分工具。",
 		SecurityNote: "中间件/组件：Nginx、Redis、RocketMQ、Dubbo+Zookeeper、达梦数据库（DM）\n" +
-			"测试账号 17500002236 / 15967224215 / 18766337856，口令均 1234qwer\n" +
-			"达梦数据库（不是 MySQL，注入/报错特征不同）；优讯产品，除权益商城外多为行内定制\n" +
+			"测试账号 13800000000 / 13900000000 / 13700000000，口令均 test1234\n" +
+			"达梦数据库（不是 MySQL，注入/报错特征不同）；自有产品，除权益商城外多为行内定制\n" +
 			"测试环境，严禁改动或删除生产类数据\n" +
 			"四期建设内容较长，原文见对接人提供的系统说明",
 	}
@@ -32,11 +32,11 @@ func TestAllianceBriefKeepsFullFields(t *testing.T) {
 		t.Errorf("这个长度的台账不该出现任何截断: %s", brief)
 	}
 	for _, want := range []string{
-		"优讯产品 + 行内定制",  // 框架末尾
+		"自有产品 + 行内定制",  // 框架末尾
 		"会员成长、网点积分工具。", // 业务末尾
 		"测试时确认",        // 登录末尾
 		"中间件：Nginx、Redis、RocketMQ、Dubbo+Zookeeper、达梦数据库（DM）",
-		"17500002236 / 15967224215 / 18766337856，口令均 1234qwer",
+		"13800000000 / 13900000000 / 13700000000，口令均 test1234",
 		"原文见对接人提供的系统说明", // 补充最后一行
 	} {
 		if !strings.Contains(brief, want) {
@@ -56,11 +56,11 @@ func TestAllianceBriefClipsLongFieldsAtBoundary(t *testing.T) {
 		Framework:    strings.Repeat("框架描述；", 40),
 		Business:     strings.Repeat("业务描述；", 40),
 		Crypto:       strings.Repeat("登录描述；", 40),
-		SecurityNote: "中间件/组件：" + strings.Repeat("组件；", 40) + "\n测试账号 17500002236，口令 1234qwer",
+		SecurityNote: "中间件/组件：" + strings.Repeat("组件；", 40) + "\n测试账号 13800000000，口令 test1234",
 	}
 	brief := buildAllianceBrief([]*db.AllianceSystem{sys}, nil)
 	t.Logf("超长字段简报：%s", brief)
-	if !strings.Contains(brief, "17500002236") || !strings.Contains(brief, "1234qwer") {
+	if !strings.Contains(brief, "13800000000") || !strings.Contains(brief, "test1234") {
 		t.Errorf("补充里的账号不该被切断: %s", brief)
 	}
 	if n := len([]rune(brief)); n > allianceBriefMaxRunes {

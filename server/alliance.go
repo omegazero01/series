@@ -410,7 +410,7 @@ func allianceSplitSecurityNote(note string) (middleware, rest string) {
 }
 
 // allianceBriefClip 把任意字段压成单行，超长时按标点回退截断，避免把账号、
-// URL、包名从中间切断（原来硬切 60 字会把「测试账号 17500002236」切成
+// URL、包名从中间切断（原来硬切 60 字会把「测试账号 13800000000」切成
 // 「测试账号 1…」）。
 func allianceBriefClip(raw string, max int) string {
 	raw = strings.ReplaceAll(raw, "\r", "")
