@@ -8,39 +8,67 @@ import (
 	"github.com/neouks/series/db"
 )
 
-// 台账补充字段里常放测试账号，简报截断不能把账号/口令从中间切断。
-func TestAllianceBriefKeepsCredentials(t *testing.T) {
+// 真实台账条目（潍坊银行综合积分权益平台）的字段长度：框架 76、业务 53、登录 49，
+// 补充 196 字（中间件 47 + 其余 142）。这个量级的简报不能出现任何截断。
+func TestAllianceBriefKeepsFullFields(t *testing.T) {
 	sys := &db.AllianceSystem{
-		ID:       8,
-		Name:     "潍坊银行综合积分权益平台托管系统",
-		URL:      "https://ttt.ebanktest.com.cn:18248/html/10124/view/login/login.html",
-		Platform: "Web",
-		Framework: "SSH（Struts2+Spring+Hibernate）；商城 H5 用 uniapp；微服务 Dubbo+Zookeeper；" +
-			"优讯产品 + 行内定制",
-		Crypto:   "账号+口令登录（商城端、商户端两套入口）；是否前端加密/验证码/token 机制未说明",
-		Business: "面向行内及外行客户的权益/会员/积分商城平台：积分体系、权益商城、活动与拼团裂变",
+		ID:        8,
+		Name:      "潍坊银行综合积分权益平台托管系统",
+		URL:       "https://ttt.ebanktest.com.cn:18248/html/10124/view/login/login.html",
+		Platform:  "Web",
+		Framework: "SSH（Struts2+Spring+Hibernate）；商城 H5 用 uniapp；微服务 Dubbo+Zookeeper；优讯产品 + 行内定制",
+		Crypto:    "账号+口令登录（商城端、商户端两套入口）；是否前端加密/验证码/token 机制未说明，测试时确认",
+		Business:  "面向行内及外行客户的权益/会员/积分商城平台：积分体系、权益商城、活动与拼团裂变、会员成长、网点积分工具。",
 		SecurityNote: "中间件/组件：Nginx、Redis、RocketMQ、Dubbo+Zookeeper、达梦数据库（DM）\n" +
 			"测试账号 17500002236 / 15967224215 / 18766337856，口令均 1234qwer\n" +
 			"达梦数据库（不是 MySQL，注入/报错特征不同）；优讯产品，除权益商城外多为行内定制\n" +
-			"测试环境，严禁改动或删除生产类数据",
+			"测试环境，严禁改动或删除生产类数据\n" +
+			"四期建设内容较长，原文见对接人提供的系统说明",
 	}
 	brief := buildAllianceBrief([]*db.AllianceSystem{sys}, nil)
-	t.Logf("简报：\n%s", brief)
+	t.Logf("简报（%d 字）：\n%s", len([]rune(brief)), brief)
 
-	for _, want := range []string{"17500002236", "15967224215", "18766337856", "1234qwer", "中间件：Nginx", "达梦数据库"} {
+	if strings.Contains(brief, "…") {
+		t.Errorf("这个长度的台账不该出现任何截断: %s", brief)
+	}
+	for _, want := range []string{
+		"优讯产品 + 行内定制",  // 框架末尾
+		"会员成长、网点积分工具。", // 业务末尾
+		"测试时确认",        // 登录末尾
+		"中间件：Nginx、Redis、RocketMQ、Dubbo+Zookeeper、达梦数据库（DM）",
+		"17500002236 / 15967224215 / 18766337856，口令均 1234qwer",
+		"原文见对接人提供的系统说明", // 补充最后一行
+	} {
 		if !strings.Contains(brief, want) {
 			t.Errorf("简报里缺少 %q", want)
 		}
-	}
-	if strings.Contains(brief, "测试账号 1…") || strings.Contains(brief, "测试账号 17500002236 / 1…") {
-		t.Errorf("账号仍被从中间切断：%s", brief)
 	}
 	if n := len([]rune(brief)); n > allianceBriefMaxRunes {
 		t.Errorf("简报长度 %d 超出上限 %d", n, allianceBriefMaxRunes)
 	}
 }
 
-// 多系统时总长仍受 1500 字约束，超出的系统只报数量。
+// 超长字段仍要截断，但不能从账号中间切。
+func TestAllianceBriefClipsLongFieldsAtBoundary(t *testing.T) {
+	sys := &db.AllianceSystem{
+		ID:           9,
+		Name:         "超长字段系统",
+		Framework:    strings.Repeat("框架描述；", 40),
+		Business:     strings.Repeat("业务描述；", 40),
+		Crypto:       strings.Repeat("登录描述；", 40),
+		SecurityNote: "中间件/组件：" + strings.Repeat("组件；", 40) + "\n测试账号 17500002236，口令 1234qwer",
+	}
+	brief := buildAllianceBrief([]*db.AllianceSystem{sys}, nil)
+	t.Logf("超长字段简报：%s", brief)
+	if !strings.Contains(brief, "17500002236") || !strings.Contains(brief, "1234qwer") {
+		t.Errorf("补充里的账号不该被切断: %s", brief)
+	}
+	if n := len([]rune(brief)); n > allianceBriefMaxRunes {
+		t.Errorf("简报长度 %d 超出上限 %d", n, allianceBriefMaxRunes)
+	}
+}
+
+// 多系统时总长仍受上限约束，超出的系统只报数量。
 func TestAllianceBriefBudgetAndOverflowNote(t *testing.T) {
 	systems := make([]*db.AllianceSystem, 0, 15)
 	for i := 1; i <= 15; i++ {

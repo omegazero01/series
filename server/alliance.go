@@ -310,10 +310,10 @@ func (s *Server) resolveAllianceTargets(ids []int64) (assetIDs []int64, brief st
 
 const (
 	allianceBriefMaxSystems   = 10
-	allianceBriefMaxRunes     = 1500
-	allianceBriefFieldRunes   = 60  // 框架/业务/登录：一句话摘要
-	allianceBriefNoteRunes    = 140 // 其他补充：测试账号、环境约束等必需信息
-	allianceBriefMwRunes      = 80  // 中间件/组件
+	allianceBriefMaxRunes     = 2400
+	allianceBriefFieldRunes   = 100 // 框架/业务/登录：一句话摘要（实测单系统约 50–80 字）
+	allianceBriefNoteRunes    = 220 // 其他补充：测试账号、环境约束等必需信息
+	allianceBriefMwRunes      = 100 // 中间件/组件
 	allianceBriefHeaderPrefix = "【联盟系统情报】"
 )
 
