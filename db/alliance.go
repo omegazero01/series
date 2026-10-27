@@ -270,6 +270,19 @@ func (s *AllianceStore) GetAllianceSystem(id int64) (*AllianceSystem, []*Allianc
 
 // CreateAllianceSystem inserts a system and, when a main URL is given, its
 // first endpoint. Runs in one transaction.
+// normalizeAllianceURLOrEmpty 返回入口归一化后的 URL；空串或无法解析时返回空串。
+func normalizeAllianceURLOrEmpty(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	norm, _, _, _, err := ParseAllianceEndpointURL(raw)
+	if err != nil {
+		return ""
+	}
+	return norm
+}
+
 func (s *AllianceStore) CreateAllianceSystem(in AllianceSystemInput) (int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -299,6 +312,13 @@ func (s *AllianceStore) UpdateAllianceSystem(id int64, in AllianceSystemInput) e
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	var oldURL string
+	if err := tx.QueryRow(`SELECT COALESCE(url,'') FROM alliance_systems WHERE id=$1`, id).Scan(&oldURL); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("联盟系统 #%d 不存在", id)
+		}
+		return err
+	}
 	res, err := tx.Exec(`
 UPDATE alliance_systems
 SET name=$2, url=$3, owner_unit=$4, platform=$5, framework=$6, crypto=$7,
@@ -311,8 +331,17 @@ WHERE id=$1`,
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("联盟系统 #%d 不存在", id)
 	}
-	if in.URL != "" {
-		if _, err := insertAllianceEndpointTx(tx, id, in.URL, ""); err != nil {
+	// 主入口跟随主 URL：主 URL 变更或清空时删掉旧的自动入口，否则旧地址仍算"有效入口"，
+	// 下次拿这个系统建任务时还会被登记成资产，可能测到已废弃的地址。
+	oldNorm := normalizeAllianceURLOrEmpty(oldURL)
+	newNorm := normalizeAllianceURLOrEmpty(in.URL)
+	if oldNorm != "" && oldNorm != newNorm {
+		if _, err := tx.Exec(`DELETE FROM alliance_endpoints WHERE system_id=$1 AND url=$2`, id, oldNorm); err != nil {
+			return err
+		}
+	}
+	if newNorm != "" {
+		if _, err := insertAllianceEndpointTx(tx, id, newNorm, ""); err != nil {
 			return err
 		}
 	}
@@ -427,12 +456,15 @@ func (s *AllianceStore) AllianceStats() (*AllianceStats, error) {
 		Scan(&out.Systems, &out.Endpoints, &out.Covered, &out.Tasks); err != nil {
 		return nil, err
 	}
+	// 注意：alliance_task_links 是"任务×系统"一行，直接 JOIN findings 会让同一个
+	// 任务的漏洞按勾选的系统个数重复计数；这里先对 task_id 去重再统计。
 	if err := s.db.QueryRow(`SELECT
   count(*) FILTER (WHERE f.severity='critical'),
   count(*) FILTER (WHERE f.severity='high'),
   count(*) FILTER (WHERE f.severity='medium'),
   count(*) FILTER (WHERE f.severity='low')
-FROM findings f JOIN alliance_task_links l ON l.task_id=f.task_id`).
+FROM findings f
+WHERE f.task_id IN (SELECT DISTINCT task_id FROM alliance_task_links)`).
 		Scan(&out.Findings.Critical, &out.Findings.High, &out.Findings.Medium, &out.Findings.Low); err != nil {
 		return nil, err
 	}

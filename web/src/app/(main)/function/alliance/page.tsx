@@ -376,7 +376,7 @@ export default function AlliancePage() {
               <StatCard label="系统数" value={stats?.systems} />
               <StatCard label="入口数" value={stats?.endpoints} />
               <StatCard label="已关联任务" value={stats?.tasks} />
-              <StatCard label="被测系统" value={stats?.covered} />
+              <StatCard label="已纳入任务的系统" value={stats?.covered} />
               <StatCard
                 label="严重/高危"
                 value={stats ? `${stats.findings.critical}/${stats.findings.high}` : undefined}
