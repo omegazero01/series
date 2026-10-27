@@ -63,10 +63,25 @@
 4. **与 noa 的互斥只在代码层保证**（`opts.Compactor != nil` 直接返回），没有实际开启 noa 同时验证。
 5. `go test ./server` 未执行（需要独立测试库；全量会失败的用例与改动无关）。
 
-## 5. 构建与替换记录（合并后填写）
+## 5. 构建与替换记录（已完成）
 
-- 合并提交：（待填，`git merge --no-ff feat/context-policy`）
-- 前端构建：`NEXT_EXPORT=1 npx next build`（待填结果）
-- exe 构建：`SERIES_SKIP_FRONTEND=1 SERIES_SKIP_NPM_CI=1 ./build.sh --target windows/amd64`（待填）
-- 旧 exe 备份：`series.exe.bak-<YYYYMMDD-HHMMSS>`（待填）
-- 新 exe SHA-256：（待填）
+- 分支提交：`3b4bb93 feat(context): 上下文压缩的清理线/摘要线可在设置页自定义`、`8c7cd31 docs(context): CHANGELOG 与上下文压缩阈值验证记录`
+- 合并提交：**`20760a4`「merge: 上下文压缩阈值可自定义（清理线/摘要线）」**；`git diff --stat 052a646 20760a4` = 13 files changed, 906 insertions(+), 8 deletions(-)
+- 前端构建：`export NEXT_EXPORT=1 && npx next build`（exit 0，产出 `web/out`）；同步 `web/out` → `server/webui/dist`（354 个文件；该目录被 `.gitignore` 忽略，不进版本库）
+- exe 构建：`SERIES_SKIP_FRONTEND=1 SERIES_SKIP_NPM_CI=1 ./build.sh --target windows/amd64` → `dist/series-windows-amd64/series.exe`，内嵌版本号 **`20760a4`**（= 合并提交，`git describe` 未带 `-dirty`）
+- 替换前状态：**没有 `series.exe` 进程在跑**（`Get-CimInstance Win32_Process -Filter "Name='series.exe'"` 为空；监听中的 8787 是 fate，不涉及）→ 不需要停服务，也不需要"重启才生效"提醒，下次启动即用新二进制
+- 旧二进制备份：`series.exe.bak-20261027-093742`（41,026,048 B，sha256 `d700eccd32a8abce977217eb74252d22cae141bc7447ee2ee5732332b91f5279`，对应 10-26 19:17 的构建）
+- 新根二进制：`series.exe`（41,053,696 B，sha256 **`44cbb26e085f64a01f9bb9cb7329f029630c0f7beaacbb1d239314442c2bd573`**），与 `dist/series-windows-amd64/series.exe` 哈希一致
+- 备份文件命中 `.gitignore` 的 `/series.exe.bak-*`，不会污染 `git status`
+
+### 5.1 过程中发现并修掉的一处事故（行尾翻转）
+
+首次提交时，`web/src/lib/types.ts` 与 `general-settings.tsx` 被 Python `pathlib.write_text` 在 Windows 上从 **LF 写成了 CRLF**，整文件翻转 → 第一次 merge 的统计是 +3811 / −2913（几乎全是行尾噪声）。处理方式：把两个文件行尾改回 LF → `git commit --amend` 修正特性提交 → `git reset --hard 052a646` 丢弃那次 merge → 重新 `git merge --no-ff`，diff 收敛为 906 ins / 8 del。Go 文件因为随后跑过 `gofmt -w`（会把行尾归一为 LF）没有受影响。
+
+**教训**：在这台机器上不要用 Python 改仓库里的前端文件（改字节或换行参数 `newline=''`），改完必须核对 `git diff --stat` 的数字是否与改动量相称。
+
+## 6. 使用方式（替换后由用户自行启动）
+
+- 启动：本机 `start-dev.bat`（UI/API `8797`、流量代理 `8798`、内嵌 PostgreSQL `5435`）——启动与停止由用户负责，本次没有启动任何服务。
+- 生效路径：设置页 →「上下文压缩（清理线 / 摘要线）」→ 选预设或手填 → 保存 → **之后启动的 run**（新的 worker/planner 会话）按新阈值执行；运行中的会话保持旧策略。
+- 建议的首个验收口径（尚未做）：克隆一个既有任务做 A/B，对比 worker 每轮 prompt 大小、缓存命中率、每意图轮数、finding 数四项。
