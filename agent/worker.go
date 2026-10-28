@@ -481,8 +481,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// prompt can use the shell-specific path (notably /mnt/c/... for WSL).
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
-	// then augment with the agent's visible skills/MCP. During the SDK settlement
-	// phase, Bash is hidden and execution-gated via Settlement.DisabledTools.
+	// then augment with the agent's visible skills/MCP. The tool list stays identical
+	// for the whole run — during the SDK settlement phase Bash is refused in the hook
+	// (settleGuard) instead of being hidden, which would invalidate the prompt cache.
 	tsx.workerExecution = true
 	base := append(tsx.WorkerTools(), w.extraTools...)
 	// Worker 需要本地读写与 Bash，但不会派后台任务；Sleep 只为后台任务轮询服务，
@@ -586,9 +587,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
-	settle := wrapupSettlement("worker", []string{"Bash"})
+	settle := wrapupSettlement("worker")
 	if tc.DeadlineUnix > 0 {
-		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
+		settle = wrapupSettlementForTask("worker", clamped)
 	}
 	opts := agentcore.Options{
 		Provider:               withAssetContext(w.prov, as, taskID),
@@ -621,7 +622,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
 		MaxDuration: maxDur,
-		// 命中预算(轮次 OR 时长)→ SDK 跑一轮收尾(隐藏 Bash),把已识别的写回,避免烂尾。
+		// 命中预算(轮次 OR 时长)→ SDK 跑一轮收尾,把已识别的写回,避免烂尾。
+		// 收尾期不再隐藏 Bash，而是由 newSession 的 settleGuard 拒其执行：
+		// 工具清单一变就破坏请求前缀，整段对话要按全价重算（实测占任务成本 5~6%）。
 		// clamped(被任务 deadline 夹逼)时用 PromptByReason:因超时=任务到点→任务超时词,
 		// 因步数=夹逼窗口内步数先耗尽→回落 per-run 词。非 clamped 维持纯 per-run。
 		Settlement: settle,
@@ -666,7 +669,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 自定义上下文线（清理/摘要），未配置时保持内置窗口推导。
 	applyContextPolicy(&opts, w.ctxPolicyFn, w.compactionWindow())
 	ctx = attachSideCapture(ctx, &opts)
-	s, closeSession, err := newSession(opts)
+	s, closeSession, err := newSession(opts, "Bash")
 	if err != nil {
 		return "", tsx.Writes(), err
 	}
