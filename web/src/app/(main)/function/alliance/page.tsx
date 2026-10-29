@@ -102,7 +102,7 @@ export default function AlliancePage() {
   const [saving, setSaving] = React.useState(false);
 
   const [pendingDelete, setPendingDelete] = React.useState<AllianceSystem | null>(null);
-  const [profileSystem, setProfileSystem] = React.useState<AllianceSystem | null>(null);
+  const [profileSystem, setProfileSystem] = React.useState<{ id: number; name: string } | null>(null);
   const [suggestions, setSuggestions] = React.useState<AllianceSuggestion[]>([]);
   const [suggestVersions, setSuggestVersions] = React.useState<Record<number, number>>({});
 
@@ -229,8 +229,12 @@ export default function AlliancePage() {
         await api.updateAllianceSystem(editing.id, input);
         toast.success("已保存");
       } else {
-        await api.createAllianceSystem(input);
-        toast.success("已创建");
+        const { id } = await api.createAllianceSystem(input);
+        toast.success("基本信息已保存，继续填写画像");
+        setDialogOpen(false);
+        setReloadTick((n) => n + 1);
+        setProfileSystem({ id, name: input.name.trim() });
+        return;
       }
       setDialogOpen(false);
       setReloadTick((n) => n + 1);
@@ -486,8 +490,12 @@ export default function AlliancePage() {
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
           <DialogHeader>
-            <DialogTitle>{editing ? `编辑台账「${editing.name}」` : "新建联盟画像"}</DialogTitle>
-            <DialogDescription>只填对渗透测试有用的信息；不确定的项写「不清楚」即可。带 * 的为必填。</DialogDescription>
+            <DialogTitle>{editing ? `编辑台账「${editing.name}」` : "新建联盟画像 · 第 1 步：基本信息"}</DialogTitle>
+            <DialogDescription>
+              {editing
+                ? "这里改的是台账字段（列表、统计与任务简报用）；结构化画像点下方「编辑画像」。"
+                : "先登记系统名称与入口；保存后进入第 2 步，按三阶段填写画像字段。带 * 的为必填。"}
+            </DialogDescription>
           </DialogHeader>
 
           <div className="grid gap-4">
@@ -642,8 +650,20 @@ export default function AlliancePage() {
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>
               取消
             </Button>
+            {editing ? (
+              <Button
+                variant="secondary"
+                disabled={saving}
+                onClick={() => {
+                  setDialogOpen(false);
+                  setProfileSystem({ id: editing.id, name: editing.name });
+                }}
+              >
+                编辑画像
+              </Button>
+            ) : null}
             <Button onClick={save} disabled={saving}>
-              {saving ? "保存中…" : "保存"}
+              {saving ? "保存中…" : editing ? "保存" : "保存并填写画像"}
             </Button>
           </DialogFooter>
         </DialogContent>
