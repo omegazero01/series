@@ -25,8 +25,8 @@ import (
 // KindText/KindThinking arrive as streaming deltas (one event per fragment); a
 // contiguous run is coalesced into a single record so the trace shows whole
 // messages, not dozens of fragments.
-func captureRun(ctx context.Context, opts agentcore.Options, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
-	s, closeSession, err := newSession(opts)
+func captureRun(ctx context.Context, opts agentcore.Options, input string, emit func(db.Activity), settleGuard ...string) (string, harness.TerminalReason, error) {
+	s, closeSession, err := newSession(opts, settleGuard...)
 	if err != nil {
 		return "", "", err
 	}

@@ -91,12 +91,42 @@ func resolveWrapupTurns(agentKey string) int {
 // turn budget are admin-editable per agent; disabled tools are code-owned policy so
 // a user can't edit away the "stop probing" guardrail. Resolved fresh each run
 // (reads DB live), so edits apply on the next run without a restart.
-func wrapupSettlement(agentKey string, disabledTools []string) *harness.Settlement {
+//
+// IMPORTANT: pass nil for disabledTools. Hiding a tool rewrites the request's tool
+// array, which sits ahead of the whole transcript — every wrap-up turn then re-bills
+// the entire conversation at full price (measured: 5-6% of a task's cost). The
+// "stop probing" guardrail now runs in the host hook instead: the tool stays
+// declared and wrap-up calls are refused (see newSession's settleGuard).
+func wrapupSettlement(agentKey string) *harness.Settlement {
 	return &harness.Settlement{
-		Prompt:        resolveWrapup(agentKey),
-		DisabledTools: disabledTools,
-		MaxTurns:      resolveWrapupTurns(agentKey),
+		Prompt:   resolveWrapup(agentKey),
+		MaxTurns: resolveWrapupTurns(agentKey),
 	}
+}
+
+// settlementPrompts flattens every prompt a settlement may inject (base Prompt plus
+// each PromptByReason override) into a de-duplicated list. The host matches these
+// against the trailing user turn to detect the wrap-up phase without touching the
+// prompt text or the SDK.
+func settlementPrompts(s *harness.Settlement) []string {
+	if s == nil {
+		return nil
+	}
+	seen := make(map[string]bool, 1+len(s.PromptByReason))
+	out := make([]string, 0, 1+len(s.PromptByReason))
+	add := func(t string) {
+		t = strings.TrimSpace(t)
+		if t == "" || seen[t] {
+			return
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	add(s.Prompt)
+	for _, t := range s.PromptByReason {
+		add(t)
+	}
+	return out
 }
 
 // ---------- 任务级超时收尾词（见 docs/任务级超时与收尾设计.md）----------
@@ -153,12 +183,11 @@ func resolveTaskTimeoutTurns(agentKey string) int {
 //   - clamped=false → 任务还早：两种 reason 都用 per-run 词（即退化为 wrapupSettlement）。
 //
 // 交给 harness 的 PromptByReason 在收尾时按【实际】reason 现场挑，无 build 时错配。
-func wrapupSettlementForTask(agentKey string, disabledTools []string, clamped bool) *harness.Settlement {
+func wrapupSettlementForTask(agentKey string, clamped bool) *harness.Settlement {
 	perRun := resolveWrapup(agentKey)
 	st := &harness.Settlement{
-		Prompt:        perRun, // 兜底(也是非 clamped 时两种 reason 的取值)
-		DisabledTools: disabledTools,
-		MaxTurns:      resolveWrapupTurns(agentKey),
+		Prompt:   perRun, // 兜底(也是非 clamped 时两种 reason 的取值)
+		MaxTurns: resolveWrapupTurns(agentKey),
 	}
 	if clamped {
 		if tt := resolveTaskTimeoutWrapup(agentKey); tt != "" {

@@ -22,6 +22,7 @@
 
 #### 修复的问题
 
+- **收尾相位不再隐藏 Bash，改在 hook 层拒绝执行（保住提示缓存）**：worker 撞到步数/时长预算进入收尾时，SDK 按 `Settlement.DisabledTools` 把 Bash 从本次请求的工具清单里删掉；工具清单排在请求最前（系统提示之后、全部历史之前），一删即改写前缀，模型服务端的缓存前缀校验从该位置起失效，整段对话按全价重算。实测任务 167 的 40 段 worker 会话中 14 段中招，收尾轮未缓存累计 61.0 万 token（扣除本来应付部分后白花 59.3 万，占该任务总成本 5.6%，占其全部未缓存输入的 16%）；任务 82 同口径白花 1502 万 token（6.5%，空闲档约 13.5 元/项目）。现在 `wrapupSettlement` / `wrapupSettlementForTask` 不再接受禁用工具列表，工具清单一整个 run 保持不变；`dispatchHooks` 用 settlement 提示词原文（`Prompt` 与 `PromptByReason`，后台改过也按运行时取值）匹配请求末尾的 user 消息来识别收尾相位，命中后 `PreToolUse` 拒绝 Bash 并返回可执行说明（改走 record_fact / insert_assets / report_finding / RecordMemory 落库）。护栏语义等价（从“看不见”改成“看得到但调不动”），planner / 主控不传守护名单、行为不变；命中时打一条 `[settlement] 收尾相位已识别` 日志便于核对。
 - **Windows 下删除 SDK Bash 自带的通用提示，消除与本机说明的冲突**：SDK（norma）给 Bash 工具附加的扩展提示建议「用 `&&` 串联命令」「用 heredoc 传多行脚本」，而本机 Bash 实际由 Windows PowerShell 5.1 执行，`&&` 报 `The token '&&' is not a valid statement separator`、`<<` 报 `Missing file specification after redirection operator`（`<` 是保留重定向符）。该段由 SDK 拼在描述末尾（`Description + "\n\n" + Prompt`），位置比本机运行环境说明和本机经验都靠后，实测是同一类 ParserError 反复出现的主要来源。现在 `agent.BashPromptOverride()` 在 Windows 上把 Bash 的扩展提示覆盖为空（`agent.OverrideToolPrompt()`，装配在 `server/assembly.go`）；PowerShell 语法、脚本文件优先等要求继续由本机运行环境说明与本机经验提供，超时上限仍在工具参数 schema 中。非 Windows 主机保持 SDK 原文。
 
 ### 任务
