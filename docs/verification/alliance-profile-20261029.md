@@ -19,10 +19,22 @@
 - 交付目录：`E:\AI\SCCBA`（由本分支 `git archive` 导出，保留上一版 README/部署文档）
 - 端口：宿主 **8792** → 容器 8787（8787 已被其他实例占用）；宿主 127.0.0.1:**8793** → 容器 8788
 - 项目名：`sccba-profile`；数据卷 `sccba-profile_pgdata`；宿主数据目录 `data/`
-- Dockerfile 使用预编译 `dist/amd64/series`，不在镜像内编译前端
-- 构建代理：宿主 Docker Desktop 全局代理为 `127.0.0.1:7897`，构建容器内不可用；
-  compose 的 `build.args` 显式改为 `http://host.docker.internal:7897`
-- 结果：构建/启动结果以交付目录 `Docker启动说明.md` 与本次会话最终报告为准
+- 镜像：`series:sccba-profile`，基于 `python:3.12-slim-bookworm` 的最小运行镜像
+  - 首次尝试按上游 Dockerfile 安装 apt/Node/Playwright：构建容器内 Docker Desktop 全局代理
+    `127.0.0.1:7897` 不可达；改 `host.docker.internal:7897` 时通时断，apt 多次 502，npm 阶段失败。
+  - 最终交付改用零外网依赖的 Dockerfile（不执行 apt/npm，只 COPY 静态二进制与 start.sh）；
+    完整工具链 Dockerfile 保留为 `Dockerfile.full`，网络正常时可替换后重建。
+- 实测结果（2026-10-29 16:24）：
+  - `docker compose ps`：`sccba-profile-postgres-1` Up (healthy)，`sccba-profile-series-1` Up，端口 8792/8793 已发布
+  - `GET /api/health` → 200
+  - `GET /` 与 `GET /setup` → 200，页面标题 `SERIES — 自主渗透测试控制台`
+  - `GET /api/alliance/systems`（未登录）→ 401，鉴权中间件生效
+  - 启动日志：`SERIES 977909c backend listening on :8787 (data=/app/data, workers=3)`；
+    数据库来源 `SERIES_PG_DSN`；`no LLM provider configured`（预期，待 UI 配置）
+  - 数据库已自动建 8 张联盟表（含 `alliance_profile_*`、`alliance_task_*`），
+    `alliance_systems` 的 `environment/document/version` 三列存在
+- 运行镜像不含 nmap/curl/Playwright 等工具（最小镜像的取舍）；平台自身 python3/bash 可用。
+  需要完整工具链时用 `Dockerfile.full`。
 
 ## 未验证（不得当成已通过）
 
