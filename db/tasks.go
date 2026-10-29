@@ -159,6 +159,9 @@ type TaskCreateOptions struct {
 	// CoverageEnabled 是「资产覆盖度功能」开关;nil=默认开(true)，让不关心该开关的创建
 	// 路径(编排 spawn、老 API)沿用原行为。仅 web 创建任务时可显式传 false 关闭。
 	CoverageEnabled *bool
+	// AllianceSnapshots 是建任务时冻结的联盟画像快照（fork-only）。为空表示
+	// 未选择联盟画像，任务行为与旧版本一致。
+	AllianceSnapshots []TaskAllianceSnapshot
 }
 
 // CreateTaskWithOptions creates an exploration, task, direct source relations,
@@ -263,6 +266,9 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, descripti
 		return nil, err
 	}
 	if err := insertTaskLLMProfiles(tx, t.ID, opts.LLMProfileIDs); err != nil {
+		return nil, err
+	}
+	if err := insertAllianceTaskSnapshotsTx(tx, t.ID, opts.AllianceSnapshots); err != nil {
 		return nil, err
 	}
 	if len(opts.LLMProfileIDs) == 0 {

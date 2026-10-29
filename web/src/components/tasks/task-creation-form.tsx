@@ -528,16 +528,16 @@ function AlliancePicker({
             id="task-alliance"
             placeholder={
               loading
-                ? "加载联盟台账中…"
+                ? "加载联盟画像中…"
                 : atLimit
                   ? `最多选择 ${MAX_ALLIANCE_SYSTEMS} 条`
-                  : "搜索系统名称 / 业务 / 框架"
+                  : "搜索画像名称 / 业务 / 框架"
             }
             disabled={loading}
           />
         </ComboboxChips>
         <ComboboxContent portalContainer={portalContainer}>
-          <ComboboxEmpty>{loading ? "加载联盟台账中…" : "没有匹配的联盟系统"}</ComboboxEmpty>
+          <ComboboxEmpty>{loading ? "加载联盟画像中…" : "没有匹配的联盟画像"}</ComboboxEmpty>
           <ComboboxList>
             {(id: string) => {
               const sys = byID.get(id);
@@ -844,7 +844,7 @@ export function TaskCreationForm() {
                   </FieldDescription>
                 </Field>
                 <Field>
-                  <FieldLabel htmlFor="task-alliance">联盟系统（台账）</FieldLabel>
+                  <FieldLabel htmlFor="task-alliance">联盟画像（可选）</FieldLabel>
                   <AlliancePicker
                     value={allianceSystemIDs}
                     onValueChange={setAllianceSystemIDs}
@@ -852,8 +852,8 @@ export function TaskCreationForm() {
                   />
                   <FieldDescription>
                     {allianceSystemIDs.length > 0
-                      ? `已选择 ${allianceSystemIDs.length} 个联盟系统。`
-                      : "从联盟台账选择系统时，其入口会自动登记为本任务资产（自动批准），描述会追加到任务描述。"}{" "}
+                      ? `已选择 ${allianceSystemIDs.length} 个联盟画像。`
+                      : "从联盟画像选择系统时，其入口会自动登记为本任务资产（自动批准），并在任务启动时尝试阅读画像（失败不阻断任务）。"}{" "}
                     最多 {MAX_ALLIANCE_SYSTEMS} 个。
                   </FieldDescription>
                 </Field>

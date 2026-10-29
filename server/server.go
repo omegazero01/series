@@ -231,7 +231,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg, m.dir) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
 		seedPrompts(m.pg)                 // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
-		s.seedOrchestrationTools()        // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		if err := m.pg.Alliance().BackfillAllianceProfiles(); err != nil {
+			log.Printf("[alliance-profile] 旧台账画像回填失败: %v", err)
+		}
+		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
 		s.wireContextReads()
 		if err := migrateContextCatalog(m.pg); err != nil {
 			log.Printf("[tools] 上下文工具迁移失败，禁止 Agent 装配: %v", err)
@@ -269,6 +272,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	}
 	s.restoreTaskRuntimes()
 	go s.workerFeedbackLoop()
+	go s.allianceProfileFeedbackLoop()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
 	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
@@ -921,6 +925,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/alliance/systems/{id}/endpoints/{endpointID}", s.deleteAllianceEndpoint)
 	mux.HandleFunc("GET /api/alliance/stats", s.allianceStats)
 	mux.HandleFunc("GET /api/alliance/brief", s.allianceBriefPreview)
+	// 联盟画像（feat/alliance-profile）：文档/版本/建议/任务快照与软阅读。
+	mux.HandleFunc("GET /api/alliance/template", s.allianceProfileTemplate)
+	mux.HandleFunc("GET /api/alliance/systems/{id}/profile", s.getAllianceProfile)
+	mux.HandleFunc("PUT /api/alliance/systems/{id}/profile", s.putAllianceProfile)
+	mux.HandleFunc("GET /api/alliance/systems/{id}/profile/history", s.getAllianceProfileHistory)
+	mux.HandleFunc("GET /api/alliance/suggestions", s.listAllianceSuggestions)
+	mux.HandleFunc("POST /api/alliance/suggestions/{id}/review", s.reviewAllianceSuggestion)
+	mux.HandleFunc("GET /api/alliance/suggestions/{id}/evidence", s.allianceSuggestionEvidence)
+	mux.HandleFunc("GET /api/tasks/{id}/alliance-profile", s.getAllianceTaskProfile)
+	mux.HandleFunc("POST /api/tasks/{id}/alliance-profile/read", s.postAllianceTaskProfileRead)
+	mux.HandleFunc("GET /api/tasks/{id}/alliance-feedback", s.getAllianceTaskFeedback)
+	mux.HandleFunc("POST /api/tasks/{id}/alliance-feedback/{run}/retry", s.postAllianceTaskFeedbackRetry)
 
 	// company system
 	mux.HandleFunc("GET /api/companies", s.listCompanies)
@@ -1702,6 +1718,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, fmt.Sprintf("一次最多选择 %d 个联盟系统", maxAllianceTaskSystems))
 		return
 	}
+	var allianceSnapshots []db.TaskAllianceSnapshot
 	if len(allianceSystemIDs) > 0 {
 		allianceAssetIDs, brief, resErr := s.resolveAllianceTargets(allianceSystemIDs)
 		if resErr != nil {
@@ -1722,6 +1739,13 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 				req.Description = strings.TrimSpace(req.Description) + "\n\n" + brief
 			}
 		}
+		// 画像快照与任务在同一事务里落库；正式画像之后的修改不会影响本任务。
+		snaps, snapErr := s.allianceStore().BuildTaskSnapshots(allianceSystemIDs)
+		if snapErr != nil {
+			writeErr(w, 400, "联盟画像快照失败："+snapErr.Error())
+			return
+		}
+		allianceSnapshots = snaps
 	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
@@ -1729,6 +1753,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled:       req.CoverageEnabled,
 		AssetApprovalTemplate: req.AssetApprovalTemplate,
+		AllianceSnapshots:     allianceSnapshots,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {

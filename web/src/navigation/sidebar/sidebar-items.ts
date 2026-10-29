@@ -60,7 +60,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "tasks", title: "任务", url: "/function/tasks", icon: Target },
       { id: "findings", title: "发现", url: "/function/findings", icon: Bug },
       { id: "assets", title: "资产", url: "/function/assets", icon: Network },
-      { id: "alliance", title: "联盟系统", url: "/function/alliance", icon: Landmark },
+      { id: "alliance", title: "联盟画像", url: "/function/alliance", icon: Landmark },
       { id: "chat", title: "对话", url: "/chat", icon: MessageSquare },
       { id: "approvals", title: "审批", url: "/system/intercept/approvals", icon: ClipboardList },
     ],

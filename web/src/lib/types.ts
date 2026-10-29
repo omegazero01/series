@@ -1624,8 +1624,10 @@ export interface AllianceSystem {
   crypto: string;
   business: string;
   security_note: string;
+  environment: string;
   tags: string[];
   status: string;
+  version: number;
   created_at: string;
   updated_at: string;
   endpoint_count: number;
@@ -1668,6 +1670,110 @@ export interface AllianceSystemInput {
   crypto: string;
   business: string;
   security_note: string;
+  environment?: string;
   tags: string[];
   status: string;
+}
+
+// ---- 联盟画像（fork-only: feat/alliance-profile）----
+
+export type AllianceFieldStatus = "unknown" | "supplied" | "confirmed" | "not_applicable";
+
+export interface AllianceProfileField {
+  id: string;
+  title: string;
+  value: string;
+  status: AllianceFieldStatus | string;
+  source: string;
+  guidance?: string;
+}
+
+export interface AllianceProfileSection {
+  id: string;
+  title: string;
+  phase: number;
+  fields: AllianceProfileField[];
+}
+
+export interface AllianceProfileDocument {
+  schema_version: number;
+  sections: AllianceProfileSection[];
+}
+
+export interface AllianceProfile {
+  system_id: number;
+  name: string;
+  environment: string;
+  version: number;
+  document: AllianceProfileDocument;
+}
+
+export interface AllianceRevision {
+  version: number;
+  source: string;
+  created_at: string;
+}
+
+export interface AllianceSuggestionInput {
+  system_id: number;
+  section_id: string;
+  section_title: string;
+  phase: number;
+  field_id: string;
+  field_title: string;
+  proposed_value: string;
+  reason: string;
+  evidence_ids: number[];
+}
+
+export interface AllianceSuggestion {
+  id: number;
+  run_id: number;
+  task_id: number;
+  system_id: number;
+  suggestion: AllianceSuggestionInput;
+  state: "pending" | "accepted" | "rejected" | string;
+  accepted_value: string;
+  accepted_version?: number;
+  reviewed_at?: string;
+  created_at: string;
+}
+
+export interface AllianceSnapshotDocument {
+  id: number;
+  name: string;
+  environment: string;
+  version: number;
+  document: AllianceProfileDocument;
+}
+
+export interface AllianceTaskSnapshot {
+  system_id: number;
+  system_name: string;
+  profile_version: number;
+  snapshot: AllianceSnapshotDocument;
+}
+
+export interface AllianceTaskReading {
+  task_id: number;
+  state: "pending" | "reading" | "ready" | "failed" | "skipped" | string;
+  result: string;
+  error: string;
+  read_at?: string;
+}
+
+export interface AllianceFeedbackRun {
+  id: number;
+  task_id: number;
+  completed_at: string;
+  state: "pending" | "running" | "done" | "failed" | string;
+  error: string;
+  attempt: number;
+  updated_at: string;
+}
+
+export interface AllianceEvidenceItem {
+  id: number;
+  kind: string;
+  payload: Record<string, unknown>;
 }

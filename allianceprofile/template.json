@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "sections": [
+    {
+      "id": "phase-1",
+      "title": "首轮接入",
+      "phase": 1,
+      "fields": [
+        {"id": "S1-01", "title": "系统名称与环境", "value": "", "status": "unknown", "source": "", "guidance": "系统用途、本次环境与环境差异；生产、测试分别建档。"},
+        {"id": "S1-02", "title": "入口与测试范围", "value": "", "status": "unknown", "source": "", "guidance": "允许的入口、范围与排除项；入口清单由台账入口自动汇总。"},
+        {"id": "S1-03", "title": "对接人与停止联系人", "value": "", "status": "unknown", "source": "", "guidance": "安全、研发、运维对接人及有效渠道，谁接收停止请求。"},
+        {"id": "S1-04", "title": "重点功能与首轮目标", "value": "", "status": "unknown", "source": "", "guidance": "优先 1 至 3 个功能、担忧与交付结果。"},
+        {"id": "S1-05", "title": "测试窗口与操作边界", "value": "", "status": "unknown", "source": "", "guidance": "时间、速率、并发、允许及禁止操作、停止条件。"},
+        {"id": "S1-06", "title": "登录方式与首轮身份", "value": "", "status": "unknown", "source": "", "guidance": "登录步骤、测试账号凭据引用、验证码或 MFA 配合方式。"},
+        {"id": "S1-07", "title": "测试数据与操作副作用", "value": "", "status": "unknown", "source": "", "guidance": "可用数据、短信/邮件/支付/审批等副作用与清理方式。"},
+        {"id": "S1-08", "title": "已知技术栈与疑点", "value": "", "status": "unknown", "source": "", "guidance": "已知语言、框架、组件与重点疑点；版本未知要明确标注。"}
+      ]
+    },
+    {
+      "id": "phase-2",
+      "title": "深入测试",
+      "phase": 2,
+      "fields": [
+        {"id": "S2-01", "title": "后端语言与框架", "value": "", "status": "unknown", "source": "", "guidance": "按服务列运行时、框架、ORM、模板引擎及实际版本。"},
+        {"id": "S2-02", "title": "前端技术与入口", "value": "", "status": "unknown", "source": "", "guidance": "框架、构建方式、SPA 或服务端渲染、管理与移动入口。"},
+        {"id": "S2-03", "title": "CMS、插件与主题", "value": "", "status": "unknown", "source": "", "guidance": "CMS 产品、版本、插件、主题与定制模块；无则说明原因。"},
+        {"id": "S2-04", "title": "服务组件与数据存储", "value": "", "status": "unknown", "source": "", "guidance": "网关、Web 服务器、容器、数据库、缓存、队列及版本。"},
+        {"id": "S2-05", "title": "接口清单与正常样例", "value": "", "status": "unknown", "source": "", "guidance": "方法、路径、参数、身份、前置步骤与正常响应样例。"},
+        {"id": "S2-06", "title": "角色与功能权限", "value": "", "status": "unknown", "source": "", "guidance": "角色、允许的功能操作、匿名用户与管理端边界。"},
+        {"id": "S2-07", "title": "租户与对象权限", "value": "", "status": "unknown", "source": "", "guidance": "用户、组织、租户与对象归属，字段可见性与授权例外。"},
+        {"id": "S2-08", "title": "多身份账号与样本", "value": "", "status": "unknown", "source": "", "guidance": "同角色不同用户、不同角色、不同租户身份及对象归属。"},
+        {"id": "S2-09", "title": "会话与统一认证", "value": "", "status": "unknown", "source": "", "guidance": "SSO、Token 或 Cookie 的获取/刷新/过期、MFA 与锁定。"},
+        {"id": "S2-10", "title": "业务流程与预期规则", "value": "", "status": "unknown", "source": "", "guidance": "前置条件、状态转换、计算规则、重复提交与禁止结果。"},
+        {"id": "S2-11", "title": "文件与批量处理功能", "value": "", "status": "unknown", "source": "", "guidance": "上传下载导入导出的路径、格式、存储、权限与清理。"},
+        {"id": "S2-12", "title": "加解密流程", "value": "", "status": "unknown", "source": "", "guidance": "位置、算法模式、填充编码、IV 或 nonce 规则、脱敏样例。"},
+        {"id": "S2-13", "title": "签名与防重放", "value": "", "status": "unknown", "source": "", "guidance": "签名字段、排序编码、时间戳窗口、随机数与测试工具。"},
+        {"id": "S2-14", "title": "架构与认证边界", "value": "", "status": "unknown", "source": "", "guidance": "入口、网关、服务、存储关系，认证授权在哪一层校验。"},
+        {"id": "S2-15", "title": "防护措施与拦截特征", "value": "", "status": "unknown", "source": "", "guidance": "WAF、限流、CSRF、上传、锁定及拦截响应与日志定位。"},
+        {"id": "S2-16", "title": "历史漏洞与近期变更", "value": "", "status": "unknown", "source": "", "guidance": "历史问题、修复说明、误报和近期发布内容。"}
+      ]
+    },
+    {
+      "id": "phase-3",
+      "title": "持续完善",
+      "phase": 3,
+      "fields": [
+        {"id": "S3-01", "title": "依赖清单与补丁基线", "value": "", "status": "unknown", "source": "", "guidance": "SBOM、锁文件、实际发布版本、启用功能与补丁。"},
+        {"id": "S3-02", "title": "密钥与密码生命周期", "value": "", "status": "unknown", "source": "", "guidance": "密钥生成、分发、保管、轮换、撤销、范围；密码哈希及成本。"},
+        {"id": "S3-03", "title": "外部依赖与异步链路", "value": "", "status": "unknown", "source": "", "guidance": "第三方接口、回调、队列的数据与身份流、归属及测试替身。"},
+        {"id": "S3-04", "title": "安全假设与威胁理解", "value": "", "status": "unknown", "source": "", "guidance": "保护对象、担心的后果、信任边界、设计假设和已有证据。"},
+        {"id": "S3-05", "title": "日志与证据定位", "value": "", "status": "unknown", "source": "", "guidance": "请求 ID、日志位置、审计事件、脱敏及副作用回看。"},
+        {"id": "S3-06", "title": "相关源码与配置", "value": "", "status": "unknown", "source": "", "guidance": "鉴权、文件、签名代码与脱敏配置，注明分支和发布版本。"},
+        {"id": "S3-07", "title": "可复用测试辅助工具", "value": "", "status": "unknown", "source": "", "guidance": "登录、刷新、签名、解密、数据初始化清理的输入输出与凭据引用。"},
+        {"id": "S3-08", "title": "修复复测与正常对照", "value": "", "status": "unknown", "source": "", "guidance": "修复版本、原证据、复测步骤、预期结果、正常功能对照。"},
+        {"id": "S3-09", "title": "画像更新与变更维护", "value": "", "status": "unknown", "source": "", "guidance": "维护人、触发条件和复核节奏。"},
+        {"id": "S3-10", "title": "覆盖记录与遗留事项", "value": "", "status": "unknown", "source": "", "guidance": "按入口/身份/功能记录已测、未测、受阻原因、负责人和下一步。"}
+      ]
+    }
+  ]
+}

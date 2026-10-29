@@ -7,7 +7,7 @@
 
 import * as React from "react";
 
-import { BarChart3Icon, PencilIcon, PlusIcon, RefreshCwIcon, SearchIcon, Trash2Icon } from "lucide-react";
+import { BarChart3Icon, FileTextIcon, LightbulbIcon, PencilIcon, PlusIcon, RefreshCwIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -37,8 +37,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { AllianceProfileDialog, AllianceSuggestionCard } from "@/components/alliance-profile";
 import { api } from "@/lib/api";
-import type { AllianceEndpoint, AllianceStats, AllianceSystem, AllianceSystemInput } from "@/lib/types";
+import type {
+  AllianceEndpoint,
+  AllianceStats,
+  AllianceSuggestion,
+  AllianceSystem,
+  AllianceSystemInput,
+} from "@/lib/types";
 
 const PLATFORM_SUGGESTIONS = ["Web", "小程序", "APP", "公众号", "混合"];
 
@@ -95,6 +102,35 @@ export default function AlliancePage() {
   const [saving, setSaving] = React.useState(false);
 
   const [pendingDelete, setPendingDelete] = React.useState<AllianceSystem | null>(null);
+  const [profileSystem, setProfileSystem] = React.useState<AllianceSystem | null>(null);
+  const [suggestions, setSuggestions] = React.useState<AllianceSuggestion[]>([]);
+  const [suggestVersions, setSuggestVersions] = React.useState<Record<number, number>>({});
+
+  const loadSuggestions = React.useCallback(() => {
+    api
+      .allianceSuggestions()
+      .then(async (items) => {
+        setSuggestions(items);
+        const ids = Array.from(new Set(items.map((s) => s.system_id)));
+        const entries = await Promise.all(
+          ids.map(async (id) => {
+            try {
+              const r = await api.allianceProfile(id);
+              return [id, r.profile.version] as const;
+            } catch {
+              return [id, 0] as const;
+            }
+          }),
+        );
+        setSuggestVersions(Object.fromEntries(entries));
+      })
+      .catch((err: Error) => toast.error(`加载画像建议失败：${err.message}`));
+  }, []);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 手动刷新经 reloadTick 触发，进入页签时重拉。
+  React.useEffect(() => {
+    if (tab === "suggestions") loadSuggestions();
+  }, [tab, loadSuggestions, reloadTick]);
 
   React.useEffect(() => {
     const t = setTimeout(() => setQApplied(q.trim()), 300);
@@ -245,9 +281,9 @@ export default function AlliancePage() {
     <div className="flex h-full flex-col gap-4 p-5">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h1 className="font-semibold text-xl">联盟系统</h1>
+          <h1 className="font-semibold text-xl">联盟画像</h1>
           <p className="text-muted-foreground text-sm">
-            城商行联盟台账：登记系统名称、入口与安全描述；新建任务时可勾选条目，描述会随任务进入测试流程。
+            城商行联盟业务系统画像台账：登记系统、入口与结构化背景；新建任务勾选后绑定固定快照，测试发现可反哺画像。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -257,7 +293,7 @@ export default function AlliancePage() {
           </Button>
           <Button size="sm" onClick={openCreate}>
             <PlusIcon />
-            新建系统
+            新建画像
           </Button>
         </div>
       </div>
@@ -268,6 +304,15 @@ export default function AlliancePage() {
           <TabsTrigger value="stats">
             <BarChart3Icon className="mr-1 size-4" />
             统计
+          </TabsTrigger>
+          <TabsTrigger value="suggestions">
+            <LightbulbIcon className="mr-1 size-4" />
+            画像建议
+            {suggestions.filter((s) => s.state === "pending").length > 0 ? (
+              <Badge variant="secondary" className="ml-1">
+                {suggestions.filter((s) => s.state === "pending").length}
+              </Badge>
+            ) : null}
           </TabsTrigger>
         </TabsList>
 
@@ -347,7 +392,10 @@ export default function AlliancePage() {
                       <TableCell className="text-muted-foreground text-xs">{fmtTime(sys.updated_at)}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
-                          <Button variant="ghost" size="icon" onClick={() => openEdit(sys)} title="编辑">
+                          <Button variant="ghost" size="icon" onClick={() => setProfileSystem(sys)} title="联盟画像">
+                            <FileTextIcon className="size-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" onClick={() => openEdit(sys)} title="编辑台账字段">
                             <PencilIcon className="size-4" />
                           </Button>
                           <Button variant="ghost" size="icon" onClick={() => setPendingDelete(sys)} title="删除">
@@ -394,12 +442,51 @@ export default function AlliancePage() {
             </div>
           </div>
         </TabsContent>
+
+        <TabsContent value="suggestions" className="mt-4 min-h-0 flex-1 overflow-auto">
+          <div className="grid gap-3">
+            {suggestions.filter((s) => s.state === "pending").length === 0 ? (
+              <Card className="p-6 text-center text-muted-foreground text-sm">
+                暂无待审核建议。任务完成/失败/超时并收尾后，平台会从本任务已确认的事实与发现里整理候选。
+              </Card>
+            ) : null}
+            {suggestions
+              .filter((s) => s.state === "pending")
+              .map((s) => (
+                <AllianceSuggestionCard
+                  key={s.id}
+                  suggestion={s}
+                  currentVersion={suggestVersions[s.system_id] ?? 0}
+                  onReviewed={() => setReloadTick((n) => n + 1)}
+                />
+              ))}
+            {suggestions.filter((s) => s.state !== "pending").length > 0 ? (
+              <Card className="grid gap-2 p-3">
+                <div className="font-medium text-sm">已处理（{suggestions.filter((s) => s.state !== "pending").length}）</div>
+                {suggestions
+                  .filter((s) => s.state !== "pending")
+                  .slice(0, 50)
+                  .map((s) => (
+                    <div key={s.id} className="flex flex-wrap items-center gap-2 border-t py-1.5 text-xs first:border-0">
+                      <Badge variant="outline">{s.state}</Badge>
+                      <span className="text-muted-foreground">
+                        {s.suggestion.field_title}（{s.suggestion.field_id}） · task #{s.task_id} · system #{s.system_id}
+                      </span>
+                      {s.accepted_version ? (
+                        <span className="text-muted-foreground">→ v{s.accepted_version}</span>
+                      ) : null}
+                    </div>
+                  ))}
+              </Card>
+            ) : null}
+          </div>
+        </TabsContent>
       </Tabs>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
           <DialogHeader>
-            <DialogTitle>{editing ? `编辑「${editing.name}」` : "新建联盟系统"}</DialogTitle>
+            <DialogTitle>{editing ? `编辑台账「${editing.name}」` : "新建联盟画像"}</DialogTitle>
             <DialogDescription>只填对渗透测试有用的信息；不确定的项写「不清楚」即可。带 * 的为必填。</DialogDescription>
           </DialogHeader>
 
@@ -561,6 +648,18 @@ export default function AlliancePage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {profileSystem ? (
+        <AllianceProfileDialog
+          systemId={profileSystem.id}
+          systemName={profileSystem.name}
+          open
+          onOpenChange={(open) => {
+            if (!open) setProfileSystem(null);
+          }}
+          onSaved={() => setReloadTick((n) => n + 1)}
+        />
+      ) : null}
 
       <AlertDialog open={pendingDelete !== null} onOpenChange={(open) => !open && setPendingDelete(null)}>
         <AlertDialogContent>

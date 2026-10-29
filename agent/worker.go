@@ -524,6 +524,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	intentText := renderIntentTask(intent)
 	sysBody := workerSystem(runProxyAddr, promptCACert, w.workDir, runDir)
+	sysBody += ts.AllianceProfileContext(taskID)
 	if w.mem != nil {
 		sysBody += memoryUsageHint
 		sysBody += HostPinnedNote(w.mem)

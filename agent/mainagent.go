@@ -167,7 +167,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	ctx = intercept.WithReviewWorkingDirectory(ctx, mainDir)
-	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
+	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir)+ts.AllianceProfileContext(taskID), def)
 	feedback, feedbackErr := ts.WorkerFeedbackContext(ctx, mainSeg)
 	if feedbackErr != nil {
 		return "", fmt.Errorf("读取 Worker 回传结果: %w", feedbackErr)

@@ -19,19 +19,22 @@ import (
 
 // AllianceSystem is one intel entry for a business system.
 type AllianceSystem struct {
-	ID           int64    `json:"id"`
-	Name         string   `json:"name"`
-	URL          string   `json:"url"`
-	OwnerUnit    string   `json:"owner_unit"`
-	Platform     string   `json:"platform"`
-	Framework    string   `json:"framework"`
-	Crypto       string   `json:"crypto"`
-	Business     string   `json:"business"`
-	SecurityNote string   `json:"security_note"`
-	Tags         []string `json:"tags"`
-	Status       string   `json:"status"`
-	CreatedAt    string   `json:"created_at"`
-	UpdatedAt    string   `json:"updated_at"`
+	ID           int64           `json:"id"`
+	Name         string          `json:"name"`
+	URL          string          `json:"url"`
+	OwnerUnit    string          `json:"owner_unit"`
+	Platform     string          `json:"platform"`
+	Framework    string          `json:"framework"`
+	Crypto       string          `json:"crypto"`
+	Business     string          `json:"business"`
+	SecurityNote string          `json:"security_note"`
+	Environment  string          `json:"environment"`
+	Tags         []string        `json:"tags"`
+	Status       string          `json:"status"`
+	Version      int64           `json:"version"`
+	Document     json.RawMessage `json:"document,omitempty"`
+	CreatedAt    string          `json:"created_at"`
+	UpdatedAt    string          `json:"updated_at"`
 	// EndpointCount is derived in list queries.
 	EndpointCount int `json:"endpoint_count"`
 }
@@ -59,6 +62,7 @@ type AllianceSystemInput struct {
 	Crypto       string   `json:"crypto"`
 	Business     string   `json:"business"`
 	SecurityNote string   `json:"security_note"`
+	Environment  string   `json:"environment"`
 	Tags         []string `json:"tags"`
 	Status       string   `json:"status"`
 }
@@ -116,6 +120,7 @@ func NormalizeAllianceSystemInput(in AllianceSystemInput) (AllianceSystemInput, 
 	in.Crypto = strings.TrimSpace(in.Crypto)
 	in.Business = strings.TrimSpace(in.Business)
 	in.SecurityNote = strings.TrimSpace(in.SecurityNote)
+	in.Environment = strings.TrimSpace(in.Environment)
 	if in.Name == "" {
 		return in, fmt.Errorf("系统名称不能为空")
 	}
@@ -179,13 +184,14 @@ func ParseAllianceEndpointURL(raw string) (norm, host, scheme string, port *int,
 
 const allianceSystemCols = `id, name, COALESCE(url,''), COALESCE(owner_unit,''), COALESCE(platform,''),
 COALESCE(framework,''), COALESCE(crypto,''), COALESCE(business,''), COALESCE(security_note,''),
+COALESCE(environment,''), COALESCE(version,1),
 COALESCE(array_to_json(tags), '[]'::json)::text, COALESCE(status,'active'), created_at::text, updated_at::text`
 
 func scanAllianceSystem(sc interface{ Scan(...any) error }, withCount bool) (*AllianceSystem, error) {
 	s := &AllianceSystem{}
 	var tagsJSON string
 	dest := []any{&s.ID, &s.Name, &s.URL, &s.OwnerUnit, &s.Platform, &s.Framework,
-		&s.Crypto, &s.Business, &s.SecurityNote, &tagsJSON, &s.Status, &s.CreatedAt, &s.UpdatedAt}
+		&s.Crypto, &s.Business, &s.SecurityNote, &s.Environment, &s.Version, &tagsJSON, &s.Status, &s.CreatedAt, &s.UpdatedAt}
 	if withCount {
 		dest = append(dest, &s.EndpointCount)
 	}
@@ -289,11 +295,19 @@ func (s *AllianceStore) CreateAllianceSystem(in AllianceSystemInput) (int64, err
 		return 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	doc, err := allianceDefaultDocument(in)
+	if err != nil {
+		return 0, err
+	}
 	var id int64
 	if err := tx.QueryRow(`
-INSERT INTO alliance_systems(name, url, owner_unit, platform, framework, crypto, business, security_note, tags, status)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::text[],$10) RETURNING id`,
-		in.Name, in.URL, in.OwnerUnit, in.Platform, in.Framework, in.Crypto, in.Business, in.SecurityNote, marshalStringArray(in.Tags), in.Status).Scan(&id); err != nil {
+INSERT INTO alliance_systems(name, url, owner_unit, platform, framework, crypto, business, security_note, environment, document, version, tags, status)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,1,$11::text[],$12) RETURNING id`,
+		in.Name, in.URL, in.OwnerUnit, in.Platform, in.Framework, in.Crypto, in.Business, in.SecurityNote,
+		in.Environment, string(doc), marshalStringArray(in.Tags), in.Status).Scan(&id); err != nil {
+		return 0, err
+	}
+	if err := insertAllianceRevisionTx(tx, id, 1, in.Name, in.Environment, string(doc), "manual"); err != nil {
 		return 0, err
 	}
 	if in.URL != "" {
@@ -312,24 +326,41 @@ func (s *AllianceStore) UpdateAllianceSystem(id int64, in AllianceSystemInput) e
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	var oldURL string
-	if err := tx.QueryRow(`SELECT COALESCE(url,'') FROM alliance_systems WHERE id=$1`, id).Scan(&oldURL); err != nil {
+	var oldURL, oldDoc string
+	var oldVersion int64
+	if err := tx.QueryRow(`SELECT COALESCE(url,''), COALESCE(document::text,'{}'), COALESCE(version,1) FROM alliance_systems WHERE id=$1`, id).Scan(&oldURL, &oldDoc, &oldVersion); err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("联盟系统 #%d 不存在", id)
 		}
 		return err
 	}
+	mergedDoc, docChanged, err := allianceMergeLegacyDocument(oldDoc, in)
+	if err != nil {
+		return err
+	}
+	version := oldVersion
+	if docChanged || strings.TrimSpace(oldDoc) == "" || strings.TrimSpace(oldDoc) == "{}" {
+		version = oldVersion + 1
+	}
 	res, err := tx.Exec(`
 UPDATE alliance_systems
 SET name=$2, url=$3, owner_unit=$4, platform=$5, framework=$6, crypto=$7,
-    business=$8, security_note=$9, tags=$10::text[], status=$11, updated_at=now()
+    business=$8, security_note=$9, environment=$10, document=$11::jsonb, version=$12,
+    tags=$13::text[], status=$14, updated_at=now()
 WHERE id=$1`,
-		id, in.Name, in.URL, in.OwnerUnit, in.Platform, in.Framework, in.Crypto, in.Business, in.SecurityNote, marshalStringArray(in.Tags), in.Status)
+		id, in.Name, in.URL, in.OwnerUnit, in.Platform, in.Framework, in.Crypto,
+		in.Business, in.SecurityNote, in.Environment, string(mergedDoc), version,
+		marshalStringArray(in.Tags), in.Status)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("联盟系统 #%d 不存在", id)
+	}
+	if version != oldVersion {
+		if err := insertAllianceRevisionTx(tx, id, version, in.Name, in.Environment, string(mergedDoc), "manual"); err != nil {
+			return err
+		}
 	}
 	// 主入口跟随主 URL：主 URL 变更或清空时删掉旧的自动入口，否则旧地址仍算"有效入口"，
 	// 下次拿这个系统建任务时还会被登记成资产，可能测到已废弃的地址。

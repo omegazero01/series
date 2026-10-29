@@ -22,6 +22,14 @@ import type {
   AgentDetail,
   AgentTrigger,
   AllianceEndpoint,
+  AllianceEvidenceItem,
+  AllianceFeedbackRun,
+  AllianceProfile,
+  AllianceProfileDocument,
+  AllianceRevision,
+  AllianceSuggestion,
+  AllianceTaskReading,
+  AllianceTaskSnapshot,
   AllianceStats,
   AllianceSystem,
   AllianceSystemInput,
@@ -468,6 +476,39 @@ export const api = {
     del<{ ok: boolean }>(`/alliance/systems/${id}/endpoints/${endpointId}`),
   allianceStats: () => get<AllianceStats>("/alliance/stats"),
   allianceBrief: (ids: number[]) => get<{ brief: string }>(`/alliance/brief?ids=${ids.join(",")}`),
+  // ---- 联盟画像（fork-only: feat/alliance-profile）----
+  allianceProfileTemplate: () => get<{ template: AllianceProfileDocument }>("/alliance/template"),
+  allianceProfile: (id: number) => get<{ profile: AllianceProfile }>(`/alliance/systems/${id}/profile`),
+  saveAllianceProfile: (
+    id: number,
+    input: { expected_version: number; environment: string; document: AllianceProfileDocument },
+  ) => put<{ profile: AllianceProfile }>(`/alliance/systems/${id}/profile`, input),
+  allianceProfileHistory: (id: number) =>
+    get<{ revisions: AllianceRevision[] }>(`/alliance/systems/${id}/profile/history`).then((r) => r?.revisions ?? []),
+  allianceSuggestions: (params: { systemId?: number; taskId?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.systemId) qs.set("system_id", String(params.systemId));
+    if (params.taskId) qs.set("task_id", String(params.taskId));
+    return get<{ suggestions: AllianceSuggestion[] }>(`/alliance/suggestions?${qs.toString()}`).then(
+      (r) => r?.suggestions ?? [],
+    );
+  },
+  reviewAllianceSuggestion: (
+    id: number,
+    input: { decision: "accepted" | "rejected"; expected_version: number; value?: string },
+  ) => post<{ suggestion: AllianceSuggestion }>(`/alliance/suggestions/${id}/review`, input),
+  allianceSuggestionEvidence: (id: number) =>
+    get<{ evidence: AllianceEvidenceItem[] }>(`/alliance/suggestions/${id}/evidence`).then((r) => r?.evidence ?? []),
+  taskAllianceProfile: (taskId: string | number) =>
+    get<{ snapshots: AllianceTaskSnapshot[]; reading: AllianceTaskReading | null }>(
+      `/tasks/${taskId}/alliance-profile`,
+    ),
+  readTaskAllianceProfile: (taskId: string | number) =>
+    post<{ reading: AllianceTaskReading | null }>(`/tasks/${taskId}/alliance-profile/read`, {}),
+  taskAllianceFeedback: (taskId: string | number) =>
+    get<{ runs: AllianceFeedbackRun[]; suggestions: AllianceSuggestion[] }>(`/tasks/${taskId}/alliance-feedback`),
+  retryTaskAllianceFeedback: (taskId: string | number, runId: number) =>
+    post<{ ok: boolean }>(`/tasks/${taskId}/alliance-feedback/${runId}/retry`, {}),
   // task-scoped view of the same endpoint — server-side paginated like `assets`
   taskAssets: (taskId: string, type = "", limit = 50, offset = 0, tested = "all", approval = "all") =>
     get<{ count: number; total: number; assets: Asset[] }>(

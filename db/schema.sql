@@ -1759,3 +1759,68 @@ CREATE TABLE IF NOT EXISTS alliance_task_links (
     PRIMARY KEY (task_id, system_id)
 );
 CREATE INDEX IF NOT EXISTS idx_alliance_task_links_system ON alliance_task_links(system_id);
+
+-- =====================================================================
+-- 联盟画像（feat/alliance-profile）：结构化画像文档、版本历史、任务快照、
+-- 软提示阅读与反哺建议。全部为加法表/列，旧二进制忽略它们即可回滚。
+-- =====================================================================
+ALTER TABLE alliance_systems ADD COLUMN IF NOT EXISTS environment TEXT NOT NULL DEFAULT '';
+ALTER TABLE alliance_systems ADD COLUMN IF NOT EXISTS document JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE alliance_systems ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1;
+
+CREATE TABLE IF NOT EXISTS alliance_profile_revisions (
+    system_id  BIGINT NOT NULL REFERENCES alliance_systems(id) ON DELETE CASCADE,
+    version    BIGINT NOT NULL,
+    snapshot   JSONB NOT NULL,
+    source     TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (system_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS alliance_task_snapshots (
+    task_id         BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    system_id       BIGINT NOT NULL,
+    system_name     TEXT NOT NULL DEFAULT '',
+    profile_version BIGINT NOT NULL,
+    snapshot        JSONB NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, system_id)
+);
+CREATE INDEX IF NOT EXISTS idx_alliance_task_snapshots_system ON alliance_task_snapshots(system_id);
+
+CREATE TABLE IF NOT EXISTS alliance_task_readings (
+    task_id    BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    state      TEXT NOT NULL DEFAULT 'pending',
+    result     TEXT NOT NULL DEFAULT '',
+    error      TEXT NOT NULL DEFAULT '',
+    read_at    TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS alliance_profile_feedback_runs (
+    id           BIGSERIAL PRIMARY KEY,
+    task_id      BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    completed_at TIMESTAMPTZ NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'pending',
+    error        TEXT NOT NULL DEFAULT '',
+    lease_until  TIMESTAMPTZ,
+    attempt      BIGINT NOT NULL DEFAULT 0,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(task_id, completed_at)
+);
+
+CREATE TABLE IF NOT EXISTS alliance_profile_suggestions (
+    id               BIGSERIAL PRIMARY KEY,
+    run_id           BIGINT NOT NULL REFERENCES alliance_profile_feedback_runs(id) ON DELETE CASCADE,
+    task_id          BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    system_id        BIGINT NOT NULL,
+    suggestion       JSONB NOT NULL,
+    state            TEXT NOT NULL DEFAULT 'pending',
+    accepted_value   TEXT NOT NULL DEFAULT '',
+    accepted_version BIGINT,
+    reviewed_at      TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_alliance_suggestions_system ON alliance_profile_suggestions(system_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_alliance_suggestions_task ON alliance_profile_suggestions(task_id, id DESC);

@@ -44,6 +44,11 @@ func (s *Server) startTaskEngine(t *Task) {
 	if ctx.Err() != nil || s.engine.IsDeleting(t.ID) {
 		return
 	}
+	// 联盟画像软提示阅读：仅在任务绑定快照时执行；失败只记录，不暂停任务。
+	s.ensureAllianceProfileRead(ctx, t)
+	if ctx.Err() != nil || s.engine.IsDeleting(t.ID) {
+		return
+	}
 	s.engine.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
 		Summary: "第 0 轮目标拆解"})
 	goals := s.createGoals(ctx, t, func(r db.Activity) {

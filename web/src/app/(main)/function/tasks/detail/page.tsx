@@ -56,6 +56,7 @@ const GraphTab = dynamic(() => import("./_tabs/graph-tab").then((m) => m.GraphTa
 const InterceptTab = dynamic(() => import("./_tabs/intercept-tab").then((m) => m.InterceptTab));
 const SmartProxyTab = dynamic(() => import("./_tabs/smart-proxy-tab").then((m) => m.SmartProxyTab));
 const OverviewTab = dynamic(() => import("./_tabs/overview-tab").then((m) => m.OverviewTab));
+const AllianceProfileTab = dynamic(() => import("./_tabs/alliance-profile-tab").then((m) => m.AllianceProfileTab));
 
 const TABS = [
   { value: "sessions", label: "会话" },
@@ -64,6 +65,7 @@ const TABS = [
   { value: "broadcast", label: "播报板" },
   { value: "findings", label: "发现" },
   { value: "assets", label: "测试资产" },
+  { value: "alliance-profile", label: "联盟画像" },
   { value: "asset-approvals", label: "资产审批" },
   { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
@@ -519,6 +521,9 @@ function TaskDetailInner() {
           </TabsContent>
           <TabsContent value="assets" className="mt-0">
             <AssetsTab taskId={id} />
+          </TabsContent>
+          <TabsContent value="alliance-profile" className="mt-0">
+            <AllianceProfileTab taskId={id} />
           </TabsContent>
           <TabsContent value="asset-approvals" className="mt-0">
             <AssetApprovalsTab taskId={id} />

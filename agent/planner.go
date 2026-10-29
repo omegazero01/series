@@ -459,6 +459,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
 	sysBody := plannerSystem(goal, p.workDir, taskDir) + plannerRetrievalRule
+	sysBody += ts.AllianceProfileContext(taskID)
 	sysBody += "\n仅未知候选按需批量调用 check_target_access；已知不可用项本轮跳过，继续已授权方向。"
 	sysBody += "\n资产审批管理不自动预载，需要管理详情时才按需分页调用 list_task_assets。管理可见不等于允许测试：只有 can_schedule=true 的当前已授权资产可下发；pending/blocked/revoked 仅供解释，不要每轮查询全部状态。"
 	if p.wantConstraints() {
