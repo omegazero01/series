@@ -15,7 +15,7 @@ import (
 const plannerBootstrapRunes = 8000
 const plannerRetrievalRule = `
 【Planner 按需读取规则，优先于旧版概览说明】本轮只提供任务基本信息、授权可见计数、本轮事件和少量相关摘要，不是完整探索图。先读与当前目标/事件相关的 goal、hint、fact、finding、digest；正文用 context_get，不能根据计数或未展示就判定已达成/不存在。不要重复拉全图或遍历全历史。
-新增意图前必须实际调用 context_search，types 包含 intent，不设置 state/intent_id/severity。按候选的每个显式及父节点继承资产查询；无资产方向用 summary 中有区分度的关键词查询。has_more=true 时继续 next_cursor 或添加方向关键词收窄，完成后再 add_intent。仅本轮完整查询链有效；预载记录、旧历史和失败调用不算。此检查不替代资产审批，也不能保证语义去重。缺少读取工具或查询失败应说明限制并结束本轮，不得绕过。只有本任务当前允许的方向才可规划；手工模式停用 Planner。`
+新增意图前必须实际调用 context_search，types 包含 intent，state 显式传空字符串（清除可能配置的默认状态，否则会漏掉其他状态的旧方向），不设置 intent_id/severity。按候选的每个显式及父节点继承资产查询；无资产方向用 summary 中有区分度的关键词查询。has_more=true 时继续 next_cursor 或添加方向关键词收窄，完成后再 add_intent。仅本轮完整查询链有效；预载记录、旧历史和失败调用不算。此检查不替代资产审批，也不能保证语义去重。缺少读取工具或查询失败应说明限制并结束本轮，不得绕过。只有本任务当前允许的方向才可规划；手工模式停用 Planner。`
 
 // Called by the trusted host during assembly, before any model/tool execution.
 // Disabled search cannot be replaced by privileged automatic preloading.
