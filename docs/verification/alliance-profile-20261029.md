@@ -1,7 +1,7 @@
 # 联盟画像（feat/alliance-profile）验证记录
 
 - 日期：2026-10-29
-- 分支：`feat/alliance-profile`（基于 `feat/alliance-system@d08da1c`）
+- 分支：`feat/alliance-profile`（基于 `feat/alliance-system@d08da1c`；UI 流程修复 `4c89e3a`）
 - 环境：Windows 11、Go 1.26、Node 20、Next.js 16.4.3
 - 未使用独立测试数据库；本次没有运行任何依赖 PostgreSQL 的用例。
 
@@ -13,6 +13,7 @@
 | 前端构建（含类型检查） | `cd web && NEXT_EXPORT=1 npx next build` | 通过；路由中包含 `/function/alliance` |
 | Linux 二进制 | `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags embedui -o dist/amd64/series ./cmd/series` | 通过；`ELF 64-bit LSB executable, x86-64, statically linked, stripped`，40,738,942 字节 |
 | Docker 镜像构建 | `docker compose build series`（E:\AI\SCCBA） | 见下方“Docker 交付”一节 |
+| UI 流程修复 | 新建画像保存后自动打开三阶段编辑器（`4c89e3a`） | 类型检查 + Next 构建通过；字符串已确认嵌入新二进制，未手工点击 |
 
 ## Docker 交付
 
