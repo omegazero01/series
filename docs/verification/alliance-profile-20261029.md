@@ -33,6 +33,7 @@
     数据库来源 `SERIES_PG_DSN`；`no LLM provider configured`（预期，待 UI 配置）
   - 数据库已自动建 8 张联盟表（含 `alliance_profile_*`、`alliance_task_*`），
     `alliance_systems` 的 `environment/document/version` 三列存在
+  - 登录签名密钥 `jwt.key` 已挂载持久化；`--force-recreate series` 重建后 `GET /api/health` 仍为 200
 - 运行镜像不含 nmap/curl/Playwright 等工具（最小镜像的取舍）；平台自身 python3/bash 可用。
   需要完整工具链时用 `Dockerfile.full`。
 
