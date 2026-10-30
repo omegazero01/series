@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+### Planner
+
+#### 修复的问题
+
+- **移除“规划前必须先查询”的硬门槛**（同步上游 `b76c684`）：删除 `agent/planner_search_gate.go`（142 行）及其测试，`add_intent` 不再要求“每个资产一条已翻完的意图搜索 + 本轮 128 条账本”，改为提示词引导主动检索。此前 Planner 在资产较多、`parent_ids` 带入血缘资产时永远凑不齐覆盖条件，表现为每小时数百次 `context_search`、`add_intent` 全被拒、零新增方向（实测任务 172 一小时 196 次搜索、3 次提交全失败、约 1 元/小时空转）。
+- **提示词迁移**：`db/planner_context_migration.go` + `agent/context_prompt_migration.go`，仅对未定制且 hash 匹配旧默认值的 Planner 系统提示做一次性替换，人工改过的不动。
+- **检索参数与角色说明对齐**（补全上游 `335bd2e`）：`server/context_tools.go` 按“本任务/其他任务”分别描述可用类型与视图，`context_search` 在角色 schema 层统一校验枚举，无默认类型权限时 `types` 变必填。
+
 ### 检索与工具契约
 
 #### 修复的问题
