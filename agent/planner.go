@@ -527,9 +527,14 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	lead := "本轮有变动；先按图引导中的事件与相关记录缩小检索范围，再决定下一步。"
 	if len(triggers) == 0 {
 		lead = "本轮没有具体节点变动信号。按需读取目标与提示；心跳提供的少量运行中意图可用于监督，未展示不代表不存在。"
+		// 回滚 05c8e90：心跳到点且已无 open/running 意图时，明确要求本轮补出方向，
+		// 避免“只复查、不派活”的空转轮（该提交之前的原始行为）。
+		if active, err := ts.HasActiveIntent(); err == nil && !active {
+			lead = "本轮是**定时巡检（心跳到点）**的唤醒，且当前**已没有任何 open 或 running 的意图**——没有 worker 在跑、也没有排队中的方向，探索已停摆。你**必须**在本轮产出一个或多个向目标推进、且与图中既有意图**互不重复**的新意图（不得产出 0 意图）；先据下面的态势判定目标是否已达成，未达成则立即补方向："
+		}
 	}
 
-	input := lead + situational + "\n\n按需读取相关目标、提示与证据；先查询已有方向再新增意图。候选均不可用、缺少查询能力或等待依赖时可以结束本轮；不要为了凑意图绕过约束。" + renderPlannerTodos(opts.Todos.List())
+	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" + renderPlannerTodos(opts.Todos.List())
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
 	if err := ctx.Err(); err != nil {
