@@ -82,24 +82,30 @@ export function AllianceProfileDialog({
   const stats = document ? documentStats(document) : null;
   const saveLabel = version === 1 ? "保存首版（v2）" : `保存修改（v${version + 1}）`;
 
-  const load = React.useCallback(() => {
-    setLoading(true);
-    Promise.all([
-      api.allianceProfile(systemId),
-      api.allianceSuggestions({ systemId }).catch(() => [] as AllianceSuggestion[]),
-    ])
-      .then(([p, sugg]) => {
-        const env = p.profile.environment ?? "";
-        setDocument(p.profile.document);
-        setEnvironment(env);
-        setVersion(p.profile.version);
-        setSuggestions(sugg);
-        setSavedSnapshot(profileSnapshotKey(p.profile.document, env));
-        setPhase(String(startAtIncomplete ? firstIncompletePhase(p.profile.document) : 1));
-      })
-      .catch((err: Error) => toast.error(`加载画像失败：${err.message}`))
-      .finally(() => setLoading(false));
-  }, [systemId, startAtIncomplete]);
+  const load = React.useCallback(
+    (silent = false) => {
+      if (!silent) setLoading(true);
+      Promise.all([
+        api.allianceProfile(systemId),
+        api.allianceSuggestions({ systemId }).catch(() => [] as AllianceSuggestion[]),
+      ])
+        .then(([p, sugg]) => {
+          const env = p.profile.environment ?? "";
+          setDocument(p.profile.document);
+          setEnvironment(env);
+          setVersion(p.profile.version);
+          setSuggestions(sugg);
+          setSavedSnapshot(profileSnapshotKey(p.profile.document, env));
+          // 静默刷新保留用户当前所在阶段，避免接受建议后跳回第一个阶段。
+          if (!silent) setPhase(String(startAtIncomplete ? firstIncompletePhase(p.profile.document) : 1));
+        })
+        .catch((err: Error) => toast.error(`加载画像失败：${err.message}`))
+        .finally(() => {
+          if (!silent) setLoading(false);
+        });
+    },
+    [systemId, startAtIncomplete],
+  );
 
   React.useEffect(() => {
     if (open) load();
@@ -221,7 +227,7 @@ export function AllianceProfileDialog({
                   placeholder="生产 / 预生产 / 测试（建议一系统一环境）"
                 />
               </div>
-              <Button variant="outline" onClick={load} disabled={saving}>
+              <Button variant="outline" onClick={() => load()} disabled={saving}>
                 <RefreshCwIcon /> 重新读取
               </Button>
               <Button variant="outline" onClick={openHistory}>
@@ -324,7 +330,7 @@ export function AllianceProfileDialog({
                     suggestion={s}
                     currentVersion={version}
                     onReviewed={() => {
-                      load();
+                      load(true);
                       onSaved?.();
                     }}
                   />
