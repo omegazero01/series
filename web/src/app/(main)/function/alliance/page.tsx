@@ -369,27 +369,27 @@ export default function AlliancePage() {
               />
               <span className="ml-auto text-muted-foreground text-sm">{systems.length} 条</span>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto">
-              <Table>
+            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+              <Table className="table-fixed" containerClassName="overflow-x-hidden">
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-14">ID</TableHead>
-                    <TableHead>系统名称</TableHead>
-                    <TableHead className="w-24">形态</TableHead>
-                    <TableHead>入口</TableHead>
-                    <TableHead>技术框架</TableHead>
-                    <TableHead>登录/加解密</TableHead>
-                    <TableHead className="w-20">状态</TableHead>
-                    <TableHead className="w-28">更新时间</TableHead>
-                    <TableHead className="w-24">操作</TableHead>
+                    <TableHead className="w-[4%] whitespace-normal">ID</TableHead>
+                    <TableHead className="w-[18%] whitespace-normal">系统名称</TableHead>
+                    <TableHead className="hidden w-[6%] whitespace-normal md:table-cell">形态</TableHead>
+                    <TableHead className="w-[22%] whitespace-normal">入口</TableHead>
+                    <TableHead className="hidden w-[13%] whitespace-normal lg:table-cell">技术框架</TableHead>
+                    <TableHead className="hidden w-[12%] whitespace-normal xl:table-cell">登录/加解密</TableHead>
+                    <TableHead className="w-[6%] whitespace-normal">状态</TableHead>
+                    <TableHead className="hidden w-[8%] whitespace-normal md:table-cell">更新时间</TableHead>
+                    <TableHead className="w-[11%] whitespace-normal">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {systems.map((sys) => (
                     <TableRow key={sys.id}>
                       <TableCell className="text-muted-foreground">{sys.id}</TableCell>
-                      <TableCell>
-                        <div className="font-medium">{sys.name}</div>
+                      <TableCell className="whitespace-normal">
+                        <div className="font-medium break-words">{sys.name}</div>
                         {sys.tags?.length ? (
                           <div className="mt-1 flex flex-wrap gap-1">
                             {sys.tags.map((t) => (
@@ -400,25 +400,27 @@ export default function AlliancePage() {
                           </div>
                         ) : null}
                       </TableCell>
-                      <TableCell>{sys.platform || "-"}</TableCell>
-                      <TableCell>
+                      <TableCell className="hidden md:table-cell">{sys.platform || "-"}</TableCell>
+                      <TableCell className="whitespace-normal">
                         <div className="max-w-72 truncate" title={sys.url}>
                           {sys.url || "-"}
                         </div>
                         <div className="text-muted-foreground text-xs">{sys.endpoint_count} 个入口</div>
                       </TableCell>
-                      <TableCell className="max-w-56 truncate" title={sys.framework}>
+                      <TableCell className="hidden max-w-56 truncate lg:table-cell" title={sys.framework}>
                         {sys.framework || "-"}
                       </TableCell>
-                      <TableCell className="max-w-56 truncate" title={sys.crypto}>
+                      <TableCell className="hidden max-w-56 truncate xl:table-cell" title={sys.crypto}>
                         {sys.crypto || "-"}
                       </TableCell>
                       <TableCell>
                         {sys.status === "archived" ? <Badge variant="outline">已归档</Badge> : <Badge>在用</Badge>}
                       </TableCell>
-                      <TableCell className="text-muted-foreground text-xs">{fmtTime(sys.updated_at)}</TableCell>
+                      <TableCell className="hidden text-muted-foreground text-xs md:table-cell">
+                        {fmtTime(sys.updated_at)}
+                      </TableCell>
                       <TableCell>
-                        <div className="flex items-center gap-1">
+                        <div className="flex flex-wrap items-center gap-1">
                           <Button
                             variant="ghost"
                             size="icon"
