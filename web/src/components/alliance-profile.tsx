@@ -24,6 +24,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { documentStats, fieldBucket, firstIncompletePhase } from "@/lib/alliance-profile-stats";
 import { api } from "@/lib/api";
 import type {
   AllianceProfileDocument,
@@ -47,18 +48,24 @@ export function statusLabel(status: string): string {
   return STATUS_LABELS[status] ?? status;
 }
 
+function profileSnapshotKey(document: AllianceProfileDocument | null, environment: string): string {
+  return JSON.stringify({ document, environment });
+}
+
 export function AllianceProfileDialog({
   systemId,
   systemName,
   open,
   onOpenChange,
   onSaved,
+  startAtIncomplete = false,
 }: {
   systemId: number;
   systemName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved?: () => void;
+  startAtIncomplete?: boolean;
 }) {
   const [document, setDocument] = React.useState<AllianceProfileDocument | null>(null);
   const [environment, setEnvironment] = React.useState("");
@@ -69,6 +76,11 @@ export function AllianceProfileDialog({
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [history, setHistory] = React.useState<AllianceRevision[]>([]);
   const [suggestions, setSuggestions] = React.useState<AllianceSuggestion[]>([]);
+  const [savedSnapshot, setSavedSnapshot] = React.useState("");
+
+  const dirty = document !== null && savedSnapshot !== profileSnapshotKey(document, environment);
+  const stats = document ? documentStats(document) : null;
+  const saveLabel = version === 1 ? "保存首版（v2）" : `保存修改（v${version + 1}）`;
 
   const load = React.useCallback(() => {
     setLoading(true);
@@ -77,14 +89,17 @@ export function AllianceProfileDialog({
       api.allianceSuggestions({ systemId }).catch(() => [] as AllianceSuggestion[]),
     ])
       .then(([p, sugg]) => {
+        const env = p.profile.environment ?? "";
         setDocument(p.profile.document);
-        setEnvironment(p.profile.environment ?? "");
+        setEnvironment(env);
         setVersion(p.profile.version);
         setSuggestions(sugg);
+        setSavedSnapshot(profileSnapshotKey(p.profile.document, env));
+        setPhase(String(startAtIncomplete ? firstIncompletePhase(p.profile.document) : 1));
       })
       .catch((err: Error) => toast.error(`加载画像失败：${err.message}`))
       .finally(() => setLoading(false));
-  }, [systemId]);
+  }, [systemId, startAtIncomplete]);
 
   React.useEffect(() => {
     if (open) load();
@@ -96,9 +111,7 @@ export function AllianceProfileDialog({
       return {
         ...doc,
         sections: doc.sections.map((s) =>
-          s.id === sectionId
-            ? { ...s, fields: s.fields.map((f) => (f.id === fieldId ? { ...f, ...patch } : f)) }
-            : s,
+          s.id === sectionId ? { ...s, fields: s.fields.map((f) => (f.id === fieldId ? { ...f, ...patch } : f)) } : s,
         ),
       };
     });
@@ -135,7 +148,8 @@ export function AllianceProfileDialog({
   }
 
   async function save() {
-    if (!document) return;
+    if (!document || !dirty) return;
+    const isInitial = version === 1;
     setSaving(true);
     try {
       const r = await api.saveAllianceProfile(systemId, {
@@ -143,9 +157,14 @@ export function AllianceProfileDialog({
         environment,
         document,
       });
+      const env = r.profile.environment ?? environment;
       setVersion(r.profile.version);
       setDocument(r.profile.document);
-      toast.success(`画像已保存（v${r.profile.version}）`);
+      setEnvironment(env);
+      setSavedSnapshot(profileSnapshotKey(r.profile.document, env));
+      toast.success(
+        isInitial ? `首版已保存（v${r.profile.version}），后续可以继续补充` : `画像已保存（v${r.profile.version}）`,
+      );
       onSaved?.();
     } catch (err) {
       const msg = (err as Error).message;
@@ -181,6 +200,18 @@ export function AllianceProfileDialog({
           <div className="py-10 text-center text-muted-foreground text-sm">加载画像中…</div>
         ) : document ? (
           <div className="grid gap-4">
+            <Card className="gap-1 border-primary/30 bg-primary/5 p-3 text-sm">
+              <div className="font-medium">先保存一版，再慢慢补</div>
+              <div className="text-muted-foreground text-xs">
+                建议先完成「首轮接入」并保存首版；深入测试、持续完善可以以后补。不确定的字段请留空，需要说明时写「待确认：…」。
+              </div>
+              {stats ? (
+                <div className="text-muted-foreground text-xs">
+                  有效已填 {stats.filled}/{stats.total} · 待确认说明 {stats.pending} · 未填 {stats.empty}
+                </div>
+              ) : null}
+            </Card>
+
             <div className="grid gap-3 md:grid-cols-[1fr_auto_auto] md:items-end">
               <div className="grid gap-1.5">
                 <Label className="text-sm">环境</Label>
@@ -206,6 +237,11 @@ export function AllianceProfileDialog({
                   .map((s) => (
                     <TabsTrigger key={s.phase} value={String(s.phase)}>
                       {s.phase}. {s.title}
+                      {stats?.byPhase[s.phase] ? (
+                        <span className="ml-1 text-[11px] text-muted-foreground">
+                          {stats.byPhase[s.phase].filled}/{stats.byPhase[s.phase].total}
+                        </span>
+                      ) : null}
                     </TabsTrigger>
                   ))}
               </TabsList>
@@ -245,16 +281,22 @@ export function AllianceProfileDialog({
                                 </SelectContent>
                               </Select>
                             </div>
-                            {f.guidance ? (
-                              <div className="text-muted-foreground text-xs">{f.guidance}</div>
-                            ) : null}
+                            {f.guidance ? <div className="text-muted-foreground text-xs">{f.guidance}</div> : null}
                             <Textarea
                               value={f.value}
                               onChange={(e) => updateField(section.id, f.id, { value: e.target.value })}
                               rows={2}
-                              placeholder="未知可以留空；不确定的事实写「待确认」"
+                              placeholder="未知请留空；需要说明时以「待确认：」开头"
                             />
-                            {f.source ? <div className="text-muted-foreground text-[11px]">来源：{f.source}</div> : null}
+                            {fieldBucket(f) === "pending" ? (
+                              <div className="text-amber-600 text-[11px]">待确认说明，不计入已填。</div>
+                            ) : null}
+                            {f.status === "not_applicable" && !f.value.trim() ? (
+                              <div className="text-destructive text-[11px]">不适用需要写原因，当前不计入已填。</div>
+                            ) : null}
+                            {f.source ? (
+                              <div className="text-muted-foreground text-[11px]">来源：{f.source}</div>
+                            ) : null}
                           </div>
                         ))}
                         {section.fields.length === 0 ? (
@@ -295,11 +337,12 @@ export function AllianceProfileDialog({
         )}
 
         <DialogFooter>
+          <div className="mr-auto text-muted-foreground text-xs">{dirty ? "有未保存修改" : "没有修改"}</div>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
             关闭
           </Button>
-          <Button onClick={save} disabled={saving || !document}>
-            {saving ? "保存中…" : `保存画像（v${version + 1}）`}
+          <Button onClick={save} disabled={saving || !document || !dirty}>
+            {saving ? "保存中…" : saveLabel}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -320,7 +363,9 @@ export function AllianceProfileDialog({
                 <span className="text-muted-foreground text-xs">{r.created_at?.slice(0, 19)}</span>
               </div>
             ))}
-            {history.length === 0 ? <div className="py-6 text-center text-muted-foreground text-sm">暂无历史</div> : null}
+            {history.length === 0 ? (
+              <div className="py-6 text-center text-muted-foreground text-sm">暂无历史</div>
+            ) : null}
           </div>
         </DialogContent>
       </Dialog>

@@ -296,8 +296,10 @@ func (s *AllianceStore) SaveAllianceProfile(id, expectedVersion int64, environme
 	defer tx.Rollback() //nolint:errcheck
 	var name, status string
 	var version int64
-	if err := tx.QueryRow(`SELECT name, COALESCE(status,'active'), COALESCE(version,1) FROM alliance_systems WHERE id=$1 FOR UPDATE`, id).
-		Scan(&name, &status, &version); err != nil {
+	var currentDoc, currentEnv string
+	if err := tx.QueryRow(`SELECT name, COALESCE(status,'active'), COALESCE(version,1),
+COALESCE(document::text,'{}'), COALESCE(environment,'') FROM alliance_systems WHERE id=$1 FOR UPDATE`, id).
+		Scan(&name, &status, &version, &currentDoc, &currentEnv); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrAllianceProfileNotFound
 		}
@@ -308,6 +310,24 @@ func (s *AllianceStore) SaveAllianceProfile(id, expectedVersion int64, environme
 	}
 	if expectedVersion > 0 && expectedVersion != version {
 		return nil, ErrAllianceProfileConflict
+	}
+	// A no-op save (same document and environment) must not inflate versions.
+	// Compare canonical JSON so whitespace / key order differences do not count.
+	if strings.TrimSpace(currentDoc) != "" && strings.TrimSpace(currentDoc) != "{}" &&
+		strings.TrimSpace(currentEnv) == strings.TrimSpace(environment) {
+		var previous allianceprofile.Document
+		if err := json.Unmarshal([]byte(currentDoc), &previous); err == nil {
+			previousRaw, err := json.Marshal(previous)
+			if err == nil && string(previousRaw) == string(raw) {
+				if err := tx.Commit(); err != nil {
+					return nil, err
+				}
+				return &AllianceSystemProfile{
+					SystemID: id, Name: name, Environment: strings.TrimSpace(currentEnv),
+					Version: version, Document: raw,
+				}, nil
+			}
+		}
 	}
 	newVersion := version + 1
 	if _, err := tx.Exec(`UPDATE alliance_systems SET document=$2::jsonb, version=$3, environment=$4,
@@ -703,10 +723,10 @@ func (s *AllianceStore) ReviewAllianceSuggestion(id, expectedVersion int64, deci
 		if value == "" {
 			return nil, fmt.Errorf("%w: 确认内容不能为空", ErrAllianceProfileInvalid)
 		}
-		var name, status, doc string
+		var name, status, doc, environment string
 		var version int64
-		if err := tx.QueryRow(`SELECT name, COALESCE(status,'active'), COALESCE(document::text,'{}'), COALESCE(version,1)
-FROM alliance_systems WHERE id=$1 FOR UPDATE`, item.SystemID).Scan(&name, &status, &doc, &version); err != nil {
+		if err := tx.QueryRow(`SELECT name, COALESCE(status,'active'), COALESCE(document::text,'{}'), COALESCE(version,1), COALESCE(environment,'')
+FROM alliance_systems WHERE id=$1 FOR UPDATE`, item.SystemID).Scan(&name, &status, &doc, &version, &environment); err != nil {
 			if err == sql.ErrNoRows {
 				return nil, ErrAllianceProfileNotFound
 			}
@@ -742,7 +762,7 @@ FROM alliance_systems WHERE id=$1 FOR UPDATE`, item.SystemID).Scan(&name, &statu
 			item.SystemID, string(raw), newVersion); err != nil {
 			return nil, err
 		}
-		if err := insertAllianceRevisionTx(tx, item.SystemID, newVersion, name, "", string(raw),
+		if err := insertAllianceRevisionTx(tx, item.SystemID, newVersion, name, environment, string(raw),
 			fmt.Sprintf("feedback:%d/task:%d", item.ID, item.TaskID)); err != nil {
 			return nil, err
 		}

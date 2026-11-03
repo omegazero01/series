@@ -7,9 +7,19 @@
 
 import * as React from "react";
 
-import { BarChart3Icon, FileTextIcon, LightbulbIcon, PencilIcon, PlusIcon, RefreshCwIcon, SearchIcon, Trash2Icon } from "lucide-react";
+import {
+  BarChart3Icon,
+  FileTextIcon,
+  LightbulbIcon,
+  PencilIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  SearchIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { toast } from "sonner";
 
+import { AllianceProfileDialog, AllianceSuggestionCard } from "@/components/alliance-profile";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -37,7 +47,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { AllianceProfileDialog, AllianceSuggestionCard } from "@/components/alliance-profile";
 import { api } from "@/lib/api";
 import type {
   AllianceEndpoint,
@@ -103,6 +112,7 @@ export default function AlliancePage() {
 
   const [pendingDelete, setPendingDelete] = React.useState<AllianceSystem | null>(null);
   const [profileSystem, setProfileSystem] = React.useState<{ id: number; name: string } | null>(null);
+  const [profileStartAtIncomplete, setProfileStartAtIncomplete] = React.useState(false);
   const [suggestions, setSuggestions] = React.useState<AllianceSuggestion[]>([]);
   const [suggestVersions, setSuggestVersions] = React.useState<Record<number, number>>({});
 
@@ -233,6 +243,7 @@ export default function AlliancePage() {
         toast.success("基本信息已保存，继续填写画像");
         setDialogOpen(false);
         setReloadTick((n) => n + 1);
+        setProfileStartAtIncomplete(false);
         setProfileSystem({ id, name: input.name.trim() });
         return;
       }
@@ -396,8 +407,28 @@ export default function AlliancePage() {
                       <TableCell className="text-muted-foreground text-xs">{fmtTime(sys.updated_at)}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
-                          <Button variant="ghost" size="icon" onClick={() => setProfileSystem(sys)} title="联盟画像">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              setProfileStartAtIncomplete(false);
+                              setProfileSystem(sys);
+                            }}
+                            title="查看联盟画像"
+                          >
                             <FileTextIcon className="size-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            onClick={() => {
+                              setProfileStartAtIncomplete(true);
+                              setProfileSystem(sys);
+                            }}
+                            title="从第一个未完成阶段继续补充"
+                          >
+                            继续补充
                           </Button>
                           <Button variant="ghost" size="icon" onClick={() => openEdit(sys)} title="编辑台账字段">
                             <PencilIcon className="size-4" />
@@ -466,15 +497,21 @@ export default function AlliancePage() {
               ))}
             {suggestions.filter((s) => s.state !== "pending").length > 0 ? (
               <Card className="grid gap-2 p-3">
-                <div className="font-medium text-sm">已处理（{suggestions.filter((s) => s.state !== "pending").length}）</div>
+                <div className="font-medium text-sm">
+                  已处理（{suggestions.filter((s) => s.state !== "pending").length}）
+                </div>
                 {suggestions
                   .filter((s) => s.state !== "pending")
                   .slice(0, 50)
                   .map((s) => (
-                    <div key={s.id} className="flex flex-wrap items-center gap-2 border-t py-1.5 text-xs first:border-0">
+                    <div
+                      key={s.id}
+                      className="flex flex-wrap items-center gap-2 border-t py-1.5 text-xs first:border-0"
+                    >
                       <Badge variant="outline">{s.state}</Badge>
                       <span className="text-muted-foreground">
-                        {s.suggestion.field_title}（{s.suggestion.field_id}） · task #{s.task_id} · system #{s.system_id}
+                        {s.suggestion.field_title}（{s.suggestion.field_id}） · task #{s.task_id} · system #
+                        {s.system_id}
                       </span>
                       {s.accepted_version ? (
                         <span className="text-muted-foreground">→ v{s.accepted_version}</span>
@@ -674,8 +711,12 @@ export default function AlliancePage() {
           systemId={profileSystem.id}
           systemName={profileSystem.name}
           open
+          startAtIncomplete={profileStartAtIncomplete}
           onOpenChange={(open) => {
-            if (!open) setProfileSystem(null);
+            if (!open) {
+              setProfileSystem(null);
+              setProfileStartAtIncomplete(false);
+            }
           }}
           onSaved={() => setReloadTick((n) => n + 1)}
         />
