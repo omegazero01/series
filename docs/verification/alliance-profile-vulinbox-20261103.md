@@ -129,8 +129,41 @@
 - finding：`findings where task_id=2`
 - 任务 2 的 worker transcript：`E:\AI\SCCBA\data\transcripts\exp2-worker-i7.jsonl`
 
-## 五、结论
+## 六、修复与复测（提交 `d032bf2`）
 
-- **画像生效：是。** 读取摘要、结构化注入、范围/边界引导、目标地址和代理绕过都实际影响了 agent。
-- **画像有 bug：有。** 最严重的是阅读/反哺 4096 输出上限导致反哺失败；其次是画像字段覆盖台账列、旧文案残留、容器内 127.0.0.1 不可达提示缺失。
-- 本次没有修改源码；只创建了测试画像和任务。测试用端口转发已停止。
+已在 `feat/alliance-profile` 修复并部署：
+
+| BUG | 修复 | 复测结果 |
+|---|---|---|
+| BUG 1 输出上限 | `allianceReadMaxOutput` 4096 → 12288；错误信息带 `stop` 和输出长度 | 任务 2 强制重读：`state=ready`；反哺 run #1 重试：`state=done`，生成 **20 条建议** |
+| BUG 2 台账列污染 | 保存画像不再回写 `owner_unit/business/framework/security_note/crypto`；编辑台账不再把扁平列合并进已有画像文档 | 系统 3 的扁平列已修复为短值；画像 v4→v5 后扁平列保持不变；新增 Go 单测通过 |
+| BUG 3 旧标题 | `allianceBriefHeaderPrefix` 改为 `【联盟画像】`，指路改为「联盟画像」页 | `/api/alliance/brief?ids=3` 已返回 `【联盟画像】来自联盟画像…` |
+| BUG 4 loopback 地址 | 台账编辑的访问地址输入框下增加容器内 `127.0.0.1` 不可达提示 | 前端类型检查和构建通过；未做浏览器点击验证 |
+| BUG 5 任务统计 | 未修 | 仍待确认：任务 2 有 goal/finding，但 `/api/tasks/2` 的 goals/findings 统计为 0 |
+
+### 反哺复测
+
+- 反哺 run #1：`failed`（旧代码 4096）→ `retry` 后 `done`，`attempt=2`；
+- 20 条建议均为 `pending`；
+- 接受建议 #19（S3-08）后：
+  - 画像版本 v4 → **v5**；
+  - 字段状态 `confirmed`；
+  - revision source `feedback:19/task:2`；
+  - revision environment **本地靶场（已授权）**（环境缺陷已修）；
+  - 台账扁平列保持短值，没有再被覆盖。
+
+### 构建与测试
+
+- `go test ./db -run 'TestAllianceMergeLegacyDocument'`：通过；
+- `go build`：通过；
+- `npx tsc --noEmit`：通过；
+- `NEXT_EXPORT=1 npx next build`：通过；
+- 容器版本：`d032bf2`，`/api/health` 200。
+
+### 仍未验证 / 未修
+
+- BUG 5 的 goals/findings 统计问题未定位；
+- BUG 4 的提示仅通过代码和构建验证，没有在浏览器里实际点击；
+- 任务 2 原任务仍是 `timeout`，没有改成成功；验证用的是它的快照和证据；
+- 测试画像/任务保留，端口转发已停止。
+
