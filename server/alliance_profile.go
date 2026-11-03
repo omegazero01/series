@@ -29,7 +29,9 @@ import (
 const (
 	allianceReadTimeout     = 120 * time.Second
 	allianceFeedbackTimeout = 4 * time.Minute
-	allianceReadMaxOutput   = 4096
+	// 12288 leaves headroom for always-thinking models (e.g. MiniMax-M3.1-Flash):
+	// 4096 was routinely consumed by reasoning before any JSON/text was emitted.
+	allianceReadMaxOutput   = 12288
 	allianceReadMaxRunes    = 48000
 	allianceEvidenceBatch   = 20
 	allianceEvidenceBytes   = 24000
@@ -360,10 +362,10 @@ func (s *Server) readAllianceProfile(ctx context.Context, t *Task, force bool) e
 	if callErr == nil && len(msg.ToolUses()) != 0 {
 		callErr = fmt.Errorf("画像阅读返回了不允许的工具调用")
 	}
-	if callErr == nil && (stop == "max_tokens" || stop == "length") {
-		callErr = fmt.Errorf("画像阅读输出不完整")
-	}
 	text := strings.TrimSpace(msg.Text())
+	if callErr == nil && (stop == "max_tokens" || stop == "length") {
+		callErr = fmt.Errorf("画像阅读输出不完整（stop=%s，长度=%d）", stop, len([]rune(text)))
+	}
 	if callErr == nil && text == "" {
 		callErr = fmt.Errorf("画像阅读输出为空")
 	}
@@ -572,10 +574,10 @@ func (s *Server) allianceCompletion(ctx context.Context, provider llm.Provider, 
 	if len(msg.ToolUses()) != 0 {
 		return "", fmt.Errorf("画像处理返回了不允许的工具调用")
 	}
-	if stop == "max_tokens" || stop == "length" {
-		return "", fmt.Errorf("画像处理输出不完整，请重试")
-	}
 	text := strings.TrimSpace(msg.Text())
+	if stop == "max_tokens" || stop == "length" {
+		return "", fmt.Errorf("画像处理输出不完整（stop=%s，长度=%d），请重试", stop, len([]rune(text)))
+	}
 	if text == "" || len([]rune(text)) > allianceReadMaxRunes {
 		return "", fmt.Errorf("画像处理输出为空或超过限制")
 	}

@@ -87,6 +87,18 @@ function fmtTime(ts: string): string {
   return t.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+// 127.0.0.1/localhost 在容器里指容器自身，不是宿主机；任务 worker 也在容器中。
+function isLoopbackAddress(value: string): boolean {
+  const raw = value.trim();
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+  } catch {
+    return /^(127\.0\.0\.1|localhost)(?::|\/|$)/i.test(raw);
+  }
+}
+
 export default function AlliancePage() {
   const [tab, setTab] = React.useState("ledger");
   const [systems, setSystems] = React.useState<AllianceSystem[]>([]);
@@ -550,6 +562,12 @@ export default function AlliancePage() {
                   onChange={(e) => setForm({ ...form, url: e.target.value })}
                   placeholder="例：https://x.example.com（有测试环境请标注）"
                 />
+                {isLoopbackAddress(form.url) ? (
+                  <div className="text-amber-600 text-xs">
+                    如果 SERIES 跑在 Docker 容器里，127.0.0.1 / localhost 指容器自身，任务 worker
+                    访问不到宿主机上的靶场。请改用容器可达地址（例如 host.docker.internal）或在宿主机做端口转发。
+                  </div>
+                ) : null}
               </Field>
             </div>
 

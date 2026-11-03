@@ -314,7 +314,7 @@ const (
 	allianceBriefFieldRunes   = 100 // 框架/业务/登录：一句话摘要（实测单系统约 50–80 字）
 	allianceBriefNoteRunes    = 220 // 其他补充：测试账号、环境约束等必需信息
 	allianceBriefMwRunes      = 100 // 中间件/组件
-	allianceBriefHeaderPrefix = "【联盟系统情报】"
+	allianceBriefHeaderPrefix = "【联盟画像】"
 )
 
 // buildAllianceBrief renders the bounded briefing appended to the task
@@ -329,7 +329,7 @@ func buildAllianceBrief(systems []*db.AllianceSystem, eps []*db.AllianceEndpoint
 		byID[ep.SystemID] = append(byID[ep.SystemID], ep)
 	}
 	var b strings.Builder
-	header := allianceBriefHeaderPrefix + "来自联盟台账，测试时可参考以下背景（完整信息见「联盟系统」页）：\n"
+	header := allianceBriefHeaderPrefix + "来自联盟画像，测试时可参考以下背景（完整信息见「联盟画像」页）：\n"
 	b.WriteString(header)
 	used := len([]rune(header))
 	written := 0

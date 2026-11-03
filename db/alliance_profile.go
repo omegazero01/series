@@ -139,27 +139,26 @@ func allianceDefaultDocument(in AllianceSystemInput) ([]byte, error) {
 	return json.Marshal(d)
 }
 
-// allianceMergeLegacyDocument applies legacy column values to the mapped fields
-// of an existing document. Returns the new JSON and whether anything changed.
+// allianceMergeLegacyDocument keeps an existing document authoritative.
+//
+// The old PATCH endpoint used to copy legacy flat columns into mapped portrait
+// fields. Those fields are not semantically equivalent (S1-03 is contacts, not
+// owner unit; S1-04 is business + first-round goal, not business alone), so the
+// copy polluted the ledger with long profile text. New rows still get a default
+// document from allianceDefaultDocument; existing documents are left untouched.
 func allianceMergeLegacyDocument(oldDoc string, in AllianceSystemInput) ([]byte, bool, error) {
-	var d allianceprofile.Document
 	if strings.TrimSpace(oldDoc) == "" || strings.TrimSpace(oldDoc) == "{}" {
 		raw, err := allianceDefaultDocument(in)
 		return raw, true, err
 	}
+	var d allianceprofile.Document
 	if err := json.Unmarshal([]byte(oldDoc), &d); err != nil {
 		return nil, false, fmt.Errorf("%w: 画像文档解析失败: %v", ErrAllianceProfileInvalid, err)
 	}
-	allianceprofile.MergeLegacy(&d, allianceprofile.LegacyFields{
-		Name: in.Name, Environment: in.Environment, OwnerUnit: in.OwnerUnit,
-		Framework: in.Framework, Crypto: in.Crypto, Business: in.Business,
-		SecurityNote: in.SecurityNote,
-	})
-	raw, err := json.Marshal(d)
-	if err != nil {
-		return nil, false, err
+	if err := d.Validate(); err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrAllianceProfileInvalid, err)
 	}
-	return raw, string(raw) != oldDoc, d.Validate()
+	return []byte(oldDoc), false, nil
 }
 
 // insertAllianceRevisionTx writes one revision row. Snapshot is the same shape
@@ -288,7 +287,6 @@ func (s *AllianceStore) SaveAllianceProfile(id, expectedVersion int64, environme
 	if err != nil {
 		return nil, err
 	}
-	sync := allianceprofile.SyncFromDocument(d)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
@@ -330,10 +328,8 @@ COALESCE(document::text,'{}'), COALESCE(environment,'') FROM alliance_systems WH
 		}
 	}
 	newVersion := version + 1
-	if _, err := tx.Exec(`UPDATE alliance_systems SET document=$2::jsonb, version=$3, environment=$4,
-owner_unit=$5, framework=$6, crypto=$7, business=$8, security_note=$9, updated_at=now() WHERE id=$1`,
-		id, string(raw), newVersion, strings.TrimSpace(environment), sync.OwnerUnit, sync.Framework,
-		sync.Crypto, sync.Business, sync.SecurityNote); err != nil {
+	if _, err := tx.Exec(`UPDATE alliance_systems SET document=$2::jsonb, version=$3, environment=$4, updated_at=now() WHERE id=$1`,
+		id, string(raw), newVersion, strings.TrimSpace(environment)); err != nil {
 		return nil, err
 	}
 	if err := insertAllianceRevisionTx(tx, id, newVersion, name, strings.TrimSpace(environment), string(raw), "manual"); err != nil {
