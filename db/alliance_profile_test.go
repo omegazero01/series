@@ -68,3 +68,25 @@ func TestAllianceMergeLegacyDocumentBuildsDefaultForEmpty(t *testing.T) {
 		t.Fatal("default document has no sections")
 	}
 }
+
+// The task-detail UI treats snapshot as an object (AllianceSnapshotDocument),
+// not as a JSON string. Ensure the API contract stays object-shaped.
+func TestTaskAllianceSnapshotJSONIsObject(t *testing.T) {
+	snap := TaskAllianceSnapshot{
+		SystemID:       3,
+		SystemName:     "系统 A",
+		ProfileVersion: 4,
+		Snapshot:       json.RawMessage(`{"id":3,"name":"系统 A","environment":"测试","version":4,"document":{"sections":[]}}`),
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["snapshot"].(map[string]any); !ok {
+		t.Fatalf("snapshot must be a JSON object, got %T: %s", body["snapshot"], raw)
+	}
+}

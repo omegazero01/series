@@ -50,11 +50,13 @@ type AllianceRevision struct {
 }
 
 // TaskAllianceSnapshot is the frozen portrait bound to a task.
+// Snapshot is json.RawMessage, not []byte: []byte marshals as a base64/escaped
+// string, while the frontend contract expects the snapshot document object.
 type TaskAllianceSnapshot struct {
-	SystemID       int64  `json:"system_id"`
-	SystemName     string `json:"system_name"`
-	ProfileVersion int64  `json:"profile_version"`
-	Snapshot       []byte `json:"snapshot"`
+	SystemID       int64           `json:"system_id"`
+	SystemName     string          `json:"system_name"`
+	ProfileVersion int64           `json:"profile_version"`
+	Snapshot       json.RawMessage `json:"snapshot"`
 }
 
 // AllianceTaskReading is the soft reading state for one task.
@@ -432,7 +434,7 @@ FROM alliance_task_snapshots WHERE task_id=$1 ORDER BY system_id`, taskID)
 		if err := rows.Scan(&snap.SystemID, &snap.SystemName, &snap.ProfileVersion, &raw); err != nil {
 			return nil, err
 		}
-		snap.Snapshot = []byte(raw)
+		snap.Snapshot = json.RawMessage(raw)
 		out = append(out, snap)
 	}
 	return out, rows.Err()
