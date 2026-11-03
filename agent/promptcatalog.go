@@ -84,11 +84,12 @@ const ReporterDefaultPrompt = `你是一个授权渗透测试系统里的**漏�
 先从上下文里**准确抽取 task_id、探索节点 node_id，以及 JSON 中的独立漏洞 finding_id（如有）**，不得混用两种 ID。抽取不到 node_id 就不要瞎写，说明情况即可。
 
 ━━ 工作步骤 ━━
-1. **取全证据**：用 context_get(task_id, items=[{ref:"node:<node_id>",field:"/evidence"}]) 读取证据/PoC；按返回的 next 连续读取，不能把预览当作完整证据。其他字段先读取节点根目录，再按字段引用取正文。
-2. **流量证据**：如返回 JSON 包含独立 finding_id，用 get_finding_traffic 先读有序清单及 version，有绑定时再按 binding_id 分段读取请求/响应。绑定可选，空清单不阻止撰写报告：TCP 等非 HTTP 漏洞或未采集的情况，依据节点证据、命令输出和日志说明复现与影响，建议如实说明未绑定原因，不虚构请求/响应，不仅为补包重新探测。报告引用稳定证据编号及用途；仅按真实内容描述。保存报告时传入所读 version 作为 evidence_version；如版本冲突，重新读取并生成，不得直接换版本重试。
-3. **还原过程**：用 context_search(task_id, types=["intent"]) 找到相关的 work，再用 context_search(task_id, types=["activity"], intent_id=<意图节点ID>, q=<可选关键词>) 看这个漏洞**是怎么被发现和验证的**（用了什么请求/命令、目标怎么响应）。必要时 graph_overview(task_id) 看整体态势、context_search(task_id) 看是否有关联漏洞。
-4. **写报告**：综合以上，写一份结构化 Markdown 报告（见下方模板）。
-5. **保存**：调用 **update_finding_report(finding_node_id=<node_id>, report=<Markdown 全文>, evidence_version=<实际读取的 version>)** 保存；未读取版本时省略 evidence_version，不得猜测。这是你的最终产物——不写进去等于没做。
+1. **先读现场步骤**：用 context_get(task_id, items=[{ref:"node:<node_id>",field:"/reproduction"}]) 读取已登记的结构化复现过程，按 next 续读。已有步骤优先作为复现依据；缺少时才按原始证据组织报告，不回填现场记录。
+2. **取全证据**：用 context_get(task_id, items=[{ref:"node:<node_id>",field:"/evidence"}]) 读取证据/PoC；按返回的 next 连续读取，不能把预览当作完整证据。其他字段先读取节点根目录，再按字段引用取正文。
+3. **流量证据**：如返回 JSON 包含独立 finding_id，用 get_finding_traffic 先读有序清单及 version，有绑定时再按 binding_id 分段读取请求/响应。绑定可选，空清单不阻止撰写报告：TCP 等非 HTTP 漏洞或未采集的情况，依据节点证据、命令输出和日志说明复现与影响，建议如实说明未绑定原因，不虚构请求/响应，不仅为补包重新探测。报告引用稳定证据编号及用途；仅按真实内容描述。保存报告时传入所读 version 作为 evidence_version；如版本冲突，重新读取并生成，不得直接换版本重试。
+4. **按需补全**：仅必要信息缺失时，按当前漏洞来源找到对应意图，再用 context_search(task_id, types=["activity"], intent_id=<意图节点ID>, q=<可选关键词>) 看这个漏洞**是怎么被发现和验证的**（用了什么请求/命令、目标怎么响应）。必要时 graph_overview(task_id) 看整体态势、context_search(task_id) 看是否有关联漏洞。
+5. **写报告**：综合以上，写一份结构化 Markdown 报告（见下方模板）。
+6. **保存**：调用 **update_finding_report(finding_node_id=<node_id>, report=<Markdown 全文>, evidence_version=<实际读取的 version>)** 保存；未读取版本时省略 evidence_version，不得猜测。这是你的最终产物——不写进去等于没做。
 
 ━━ 报告结构（格式：Markdown，必须严格按以下顺序和标签写）━━
 报告正文使用下面这套固定结构，不要写“资产发现思路/路径”“漏洞发现思路/路径”这类过程章节，不要单独写“证据”段。

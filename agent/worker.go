@@ -405,7 +405,14 @@ func IntentAssetIDs(ts *db.ExplorationStore, intent *db.Node) ([]int64, error) {
 }
 
 func renderIntentTask(intent *db.Node) string {
-	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
+	var p struct {
+		Summary string `json:"summary"`
+	}
+	_ = json.Unmarshal(intent.Payload, &p)
+	runes := []rune(p.Summary)
+	preview := string(runes[:min(1600, len(runes))])
+	more := len(runes) > 1600
+	return fmt.Sprintf("\n\n【本次唯一执行意图】id=%d；只执行本意图，写回后停止。\n职责预览：%s\n说明是否省略：%t。完整原文：context_get({\"items\":[{\"ref\":\"node:%d\",\"field\":\"/summary\"}]})。预览不是完整执行要求；关键要求不明确时先调用上述context_get，并按返回的next续读，不得自行补全。", intent.ID, preview, more, intent.ID)
 }
 
 // renderWorkerGraphOverview folds the global situational snapshot into the worker's
@@ -481,13 +488,16 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// prompt can use the shell-specific path (notably /mnt/c/... for WSL).
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
-	// then augment with the agent's visible skills/MCP. During the SDK settlement
-	// phase, Bash is hidden and execution-gated via Settlement.DisabledTools.
+	// then augment with the agent's visible skills/MCP. The tool list stays identical
+	// for the whole run — during the SDK settlement phase Bash is refused in the hook
+	// (settleGuard) instead of being hidden, which would invalidate the prompt cache.
 	tsx.workerExecution = true
 	base := append(tsx.WorkerTools(), w.extraTools...)
 	// Worker 需要本地读写与 Bash，但不会派后台任务；Sleep 只为后台任务轮询服务，
 	// 不把它的 schema 重复发送给每一次 completion。
 	base = append(base, workerLocalTools()...)
+	ctx = withContextObserver(ctx, emit)
+	ctx = context.WithValue(ctx, contextOutputDirectoryKey{}, cmdOutDir(runDir))
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, AgentKey: "worker"})
 	ctx = WithTaskToolSet(ctx, tsx)
 	tools, def, cleanup, err := AugmentTools(ctx, "worker", base)
@@ -506,17 +516,13 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		tools = append(tools, memoryCatalogTools(w.mem)...)
 	}
 
-	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
-	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，
-	// 长 run 里意图永远在场，续跑时也不依赖 transcript 历史是否留住那条首消息。代价是 system
-	// 混入 per-intent 易变数据、失去跨意图缓存复用；这是刻意的取舍（意图丢失比省 token 严重得多）。
-	// 与 planner「态势块放 user turn」分叉是有意的：planner 本身是产意图的那个、没有单一 mandate，
-	// worker 有。启动 user 消息仅预载上游事实/漏洞摘要，其余上下文通过检索按需获取。
-	// 本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
+	// Keep a bounded mandate and identity in system. Long instructions remain
+	// available through typed node fields, never as repeated full payload JSON.
 	// The run-wide intent is not the current tool action. Do not forward it or
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := tsx.workerLaunchContext(ctx, intent.ID)
+	overview += workerMemoryPreview(w.mem, nodeSummary(intent))
 	runProxyAddr := TaskProxyAddr(w.proxyAddr, w.proxyCACert, taskID, guard.AssetSkipScope(ctx))
 	promptCACert := ""
 	if w.trafficRecording {
@@ -562,10 +568,14 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 				summaries := []map[string]any{}
 				for _, asset := range assets {
 					if visible[asset.ID] {
-						summaries = append(summaries, assetSummary(asset, true))
+						candidate := append(append([]map[string]any{}, summaries...), assetSummary(asset, true))
+						raw, _ := json.Marshal(candidate)
+						if len([]rune(string(raw))) <= 2600 {
+							summaries = candidate
+						}
 					}
 				}
-				if b, err := json.Marshal(map[string]any{"assets": summaries, "has_more": len(intentAssets) > 10}); err == nil {
+				if b, err := json.Marshal(map[string]any{"assets": summaries, "has_more": len(intentAssets) > len(summaries), "read": map[string]any{"tool": "context_get", "args": map[string]any{"items": []contextRead{{Ref: fmt.Sprintf("node:%d", intent.ID), Field: "/asset_ids"}}}, "note": "分页读取当前意图血缘asset_ids，再用asset_get读取所需身份"}}); err == nil {
 					sysBody += "\n\n本意图及上游事实关联的目标资产摘要：\n" + string(b)
 				}
 				// 意图明确针对的这些资产 → 自动纳入任务测试范围（与 insertAssets 同一套
@@ -587,10 +597,16 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
-	settle := wrapupSettlement("worker", []string{"Bash"})
+	settle := wrapupSettlement("worker")
 	if tc.DeadlineUnix > 0 {
-		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
+		settle = wrapupSettlementForTask("worker", clamped)
 	}
+	workerTodos, todoErr := loadWorkerTodos(runDir, taskID, intent.ID)
+	if todoErr != nil {
+		return harness.ReasonAbortedTools, tsx.Writes(), fmt.Errorf("读取执行待办: %w", todoErr)
+	}
+	ctx = context.WithValue(ctx, workerTodoKey{}, workerTodos)
+	tools = append(tools, workerTodoTool{CoreTool: workerTodos.store.Tool(), state: workerTodos})
 	opts := agentcore.Options{
 		Provider:               withAssetContext(w.prov, as, taskID),
 		SystemPrompt:           system,
@@ -622,7 +638,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
 		MaxDuration: maxDur,
-		// 命中预算(轮次 OR 时长)→ SDK 跑一轮收尾(隐藏 Bash),把已识别的写回,避免烂尾。
+		// 命中预算(轮次 OR 时长)→ SDK 跑一轮收尾,把已识别的写回,避免烂尾。
+		// 收尾期不再隐藏 Bash，而是由 newSession 的 settleGuard 拒其执行：
+		// 工具清单一变就破坏请求前缀，整段对话要按全价重算（实测占任务成本 5~6%）。
 		// clamped(被任务 deadline 夹逼)时用 PromptByReason:因超时=任务到点→任务超时词,
 		// 因步数=夹逼窗口内步数先耗尽→回落 per-run 词。非 clamped 维持纯 per-run。
 		Settlement: settle,
@@ -630,7 +648,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// full output preserved on disk. 截断上限用 SDK 默认(30000 字符)。
 		ToolOutputDir: cmdOutDir(runDir),
 		Compaction:    compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
-		Todos:         actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
+		Todos:         nil,                                    // Host-owned bounded preview; full progress is saved in the intent directory.
 		NonStreaming:  w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:     w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
 	}
@@ -654,7 +672,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		}
 	}
 	// 意图 / 启动指令 / 意图锚定资产已随 system prompt 下发（见上方 sysBody 组装）。
-	// 这条启动 user 消息只承载【全局态势 overview】——可降级的了解大局信息，压掉无碍。
+	// 启动消息仅包含有界上游摘要与经验预览；任务原文及证据通过引用读取。
 	// overview 罕见地 marshal 失败为空时，回退一句启动词，避免首轮出现空 user 消息。
 	input := overview
 	if strings.TrimSpace(input) == "" {
@@ -663,11 +681,14 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
 	noaSession := WorkerSessionID(ts.ID(), intent.ID)
+	if opts.Compaction != nil && opts.MaxTokens > 0 {
+		opts.Compaction.MaxOutputTokens = opts.MaxTokens
+	}
 	enableNoa(&opts, w.noaEnabledFn, w.workDir, noaSession, noaWarn(noaSession))
 	// 自定义上下文线（清理/摘要），未配置时保持内置窗口推导。
 	applyContextPolicy(&opts, w.ctxPolicyFn, w.compactionWindow())
 	ctx = attachSideCapture(ctx, &opts)
-	s, closeSession, err := newSession(opts)
+	s, closeSession, err := newSession(opts, "Bash")
 	if err != nil {
 		return "", tsx.Writes(), err
 	}

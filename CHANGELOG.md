@@ -21,6 +21,25 @@
 - 旧台账启动时幂等回填画像文档（`legacy-migration`），旧 PATCH 入口保存时把扁平列合并回文档，避免两份事实源分叉。
 - 原台账统计、入口→标准资产登记、任务×系统关联、简报文本保持原行为；统计口径不变。
 
+### Planner
+
+#### 修复的问题
+
+- **回滚 `05c8e90` 的规划行为（提示词层）**：恢复“目标未达成且无 open/running 意图时本轮必须产出意图”的硬底线与心跳强制文案，去掉“先查询已有方向再新增意图”的强制检索语义。此前 Planner 每轮可无限检索后才收尾：门槛之后建的任务每轮工具调用 46~66 次（门槛之前 13~18 次），单轮时长由 4~6 分钟涨到 12~16 分钟，172 今天单轮达 103~152 次。检索工具与按需读取保留，仅回滚行为，不整提交回滚（整提交回滚会连带删除 10-23 之后的地基并丢失分叉功能，实测 8 处冲突、编译失败）。
+
+- **移除“规划前必须先查询”的硬门槛**（同步上游 `b76c684`）：删除 `agent/planner_search_gate.go`（142 行）及其测试，`add_intent` 不再要求“每个资产一条已翻完的意图搜索 + 本轮 128 条账本”，改为提示词引导主动检索。此前 Planner 在资产较多、`parent_ids` 带入血缘资产时永远凑不齐覆盖条件，表现为每小时数百次 `context_search`、`add_intent` 全被拒、零新增方向（实测任务 172 一小时 196 次搜索、3 次提交全失败、约 1 元/小时空转）。
+- **提示词迁移**：`db/planner_context_migration.go` + `agent/context_prompt_migration.go`，仅对未定制且 hash 匹配旧默认值的 Planner 系统提示做一次性替换，人工改过的不动。
+- **检索参数与角色说明对齐**（补全上游 `335bd2e`）：`server/context_tools.go` 按“本任务/其他任务”分别描述可用类型与视图，`context_search` 在角色 schema 层统一校验枚举，无默认类型权限时 `types` 变必填。
+
+### 检索与工具契约
+
+#### 修复的问题
+
+- **显式空查询条件不再被默认值覆盖**（移植上游 `335bd2e`）：`context_search` 的 `q`/`state`/`severity` 显式传空字符串时不再被后台保存的 schema 默认值替换，`state=""` 可真正跨状态查重；只有字段完全缺失才补默认值。原先 Planner 传“不限状态”会被默认值顶回单一状态，漏看历史方向后重复开意图。
+- **`asset_search` 的 `untested` 不再有隐藏默认值**：装配时删除该参数的 `default`，描述明确“须显式传 true 启用；省略为普通搜索”；关闭覆盖度时同时把 `dsl` 描述改为必填非空，避免普通搜索被悄悄改成“只看未测试资产”。
+- **枚举参数报错给出允许值**：参数校验错误从 `unsupported value` 改为 `unsupported value; allowed values: [...]`（候选值 ≤512 字节时），且不回显模型输入原文，减少模型靠试错猜参数。
+- **`graph_overview` 说明改为按需读取**：不再声称“Planner 每轮已预取”，避免模型据此跳过态势读取、仅凭计数判断目标完成。
+
 ### Agent
 
 #### 新增的功能
@@ -39,6 +58,7 @@
 
 #### 修复的问题
 
+- **收尾相位不再隐藏 Bash，改在 hook 层拒绝执行（保住提示缓存）**：worker 撞到步数/时长预算进入收尾时，SDK 按 `Settlement.DisabledTools` 把 Bash 从本次请求的工具清单里删掉；工具清单排在请求最前（系统提示之后、全部历史之前），一删即改写前缀，模型服务端的缓存前缀校验从该位置起失效，整段对话按全价重算。实测任务 167 的 40 段 worker 会话中 14 段中招，收尾轮未缓存累计 61.0 万 token（扣除本来应付部分后白花 59.3 万，占该任务总成本 5.6%，占其全部未缓存输入的 16%）；任务 82 同口径白花 1502 万 token（6.5%，空闲档约 13.5 元/项目）。现在 `wrapupSettlement` / `wrapupSettlementForTask` 不再接受禁用工具列表，工具清单一整个 run 保持不变；`dispatchHooks` 用 settlement 提示词原文（`Prompt` 与 `PromptByReason`，后台改过也按运行时取值）匹配请求末尾的 user 消息来识别收尾相位，命中后 `PreToolUse` 拒绝 Bash 并返回可执行说明（改走 record_fact / insert_assets / report_finding / RecordMemory 落库）。护栏语义等价（从“看不见”改成“看得到但调不动”），planner / 主控不传守护名单、行为不变；命中时打一条 `[settlement] 收尾相位已识别` 日志便于核对。
 - **Windows 下删除 SDK Bash 自带的通用提示，消除与本机说明的冲突**：SDK（norma）给 Bash 工具附加的扩展提示建议「用 `&&` 串联命令」「用 heredoc 传多行脚本」，而本机 Bash 实际由 Windows PowerShell 5.1 执行，`&&` 报 `The token '&&' is not a valid statement separator`、`<<` 报 `Missing file specification after redirection operator`（`<` 是保留重定向符）。该段由 SDK 拼在描述末尾（`Description + "\n\n" + Prompt`），位置比本机运行环境说明和本机经验都靠后，实测是同一类 ParserError 反复出现的主要来源。现在 `agent.BashPromptOverride()` 在 Windows 上把 Bash 的扩展提示覆盖为空（`agent.OverrideToolPrompt()`，装配在 `server/assembly.go`）；PowerShell 语法、脚本文件优先等要求继续由本机运行环境说明与本机经验提供，超时上限仍在工具参数 schema 中。非 Windows 主机保持 SDK 原文。
 
 ### 任务

@@ -11,6 +11,17 @@ func (d *DB) MigratePlannerOnDemandPrompt(template string, hashes []string) erro
 	return d.migratePromptContracts("planner_on_demand_prompt_v1", "planner_on_demand_prompt_report_v1", map[string]string{"planner": template}, map[string][]string{"planner": hashes})
 }
 
+// An independent marker upgrades installs that have already completed v1.
+func (d *DB) MigratePlannerProactivePrompt(template string, hashes []string) error {
+	return d.migratePromptContracts("planner_proactive_prompt_v1", "planner_proactive_prompt_report_v1", map[string]string{"planner": template}, map[string][]string{"planner": hashes})
+}
+
+// Restores direct planning/dispatch after the proactive-query default shipped.
+// Keep all prior prompt versions and update only exact recognized defaults.
+func (d *DB) MigratePlannerDirectDispatchPrompt(template string, hashes []string) error {
+	return d.migratePromptContracts("planner_direct_dispatch_prompt_v1", "planner_direct_dispatch_prompt_report_v1", map[string]string{"planner": template}, map[string][]string{"planner": hashes})
+}
+
 // Only replace implicit overview reads with equivalent task-local searches.
 // Disabled/unbound/custom tools and all cross-task grants remain untouched.
 func (d *DB) MigratePlannerGraphReads() error {

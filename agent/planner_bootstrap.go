@@ -14,8 +14,10 @@ import (
 
 const plannerBootstrapRunes = 8000
 const plannerRetrievalRule = `
-【Planner 按需读取规则，优先于旧版概览说明】本轮只提供任务基本信息、授权可见计数、本轮事件和少量相关摘要，不是完整探索图。先读与当前目标/事件相关的 goal、hint、fact、finding、digest；正文用 context_get，不能根据计数或未展示就判定已达成/不存在。不要重复拉全图或遍历全历史。
-新增意图前必须实际调用 context_search，types 包含 intent，不设置 state/intent_id/severity。按候选的每个显式及父节点继承资产查询；无资产方向用 summary 中有区分度的关键词查询。has_more=true 时继续 next_cursor 或添加方向关键词收窄，完成后再 add_intent。仅本轮完整查询链有效；预载记录、旧历史和失败调用不算。此检查不替代资产审批，也不能保证语义去重。缺少读取工具或查询失败应说明限制并结束本轮，不得绕过。只有本任务当前允许的方向才可规划；手工模式停用 Planner。`
+【Planner 规划与下发流程，替代旧版查询前置要求】依据任务目标、本轮事件和已有上下文判断下一步。信息足够时直接调用 add_intent，无需先查询已有意图、资产或探索图；仅在信息不足、资产身份不明或需要核对历史进度时按需检索。仅监督或等待结果时复用已有信息，不增加固定查询。
+结合已知的排队、运行和历史方向避免重复；数据库仍执行去重。不要把旧提示词或历史中的先查后建要求作为下发前置步骤。检索工具被禁用、未查询或尚有下一页，均不单独阻止合法意图提交；权限和执行约束照常检查。
+本轮图引导是授权计数、事件和少量相关摘要，不是完整探索图，未展示不代表不存在。需要补全时使用 context_search(types/q/asset_id/cursor)、context_get(items/ref/view/field)；资产身份不明时使用 asset_search(dsl/type/offset)，详细字段用 asset_get(ids)。已知资产 ID 可直接用于 add_intent.asset_ids，不必重新搜索。has_more 只表示未展示完，按需收窄或续页，不要求遍历全图。查询失败时说明信息缺口，不原样重复失败调用。
+资产审批、工具绑定、任务隔离、用户取消和禁报约束继续生效；手工模式停用 Planner。摘要仅用于导航，目标达成和关键判断必须依据原始证据；区分observed/inferred/failed/unverified，不把未展示或查询失败当成不存在。`
 
 // Called by the trusted host during assembly, before any model/tool execution.
 // Disabled search cannot be replaced by privileged automatic preloading.
@@ -53,6 +55,20 @@ func (p assetContextProvider) refreshPlannerBootstrap(ctx context.Context, req l
 			if json.Unmarshal([]byte(b.Text[start:end]), &value) != nil {
 				req.Messages[mi].Content[bi].Text = b.Text[:start] + `{"unavailable":"引导记录无法复核，请通过 context_search 重新读取"}` + b.Text[end:]
 				continue
+			}
+			var previousAccess string
+			_ = json.Unmarshal(value["access_revision"], &previousAccess)
+			if previousAccess != "" {
+				if ts, _ := ctx.Value(taskToolSetContextKey{}).(*ToolSet); ts != nil && ts.ts != nil && ts.taskID == p.taskID {
+					current, e := ts.ts.GraphAccessRevision(ctx)
+					if e != nil {
+						return req, e
+					}
+					if current != previousAccess {
+						delete(value, "counts")
+						value["counts_access_changed"] = json.RawMessage(`true`)
+					}
+				}
 			}
 			var records []db.PlannerContextRecord
 			if json.Unmarshal(value["records"], &records) != nil {
@@ -156,6 +172,7 @@ func (t *ToolSet) plannerBootstrap(ctx context.Context, triggers []TriggerEvent)
 			out["task_description_omitted"] = true
 		}
 		out["counts"] = data.Counts
+		out["graph_revision"] = data.Revision
 		visibleCount := 0
 		for _, c := range data.Counts {
 			visibleCount += c.Count
@@ -164,6 +181,12 @@ func (t *ToolSet) plannerBootstrap(ctx context.Context, triggers []TriggerEvent)
 		if data.HasMore {
 			out["related_records_truncated"] = true
 		}
+	}
+	if data.AccessRevision != "" {
+		out["access_revision"] = data.AccessRevision
+	} else {
+		delete(out, "counts")
+		out["counts_unavailable"] = "审批范围版本读取失败"
 	}
 	marshal := func() []byte { b, _ := json.Marshal(out); return b }
 	for _, record := range data.Records {

@@ -1824,3 +1824,6 @@ CREATE TABLE IF NOT EXISTS alliance_profile_suggestions (
 );
 CREATE INDEX IF NOT EXISTS idx_alliance_suggestions_system ON alliance_profile_suggestions(system_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_alliance_suggestions_task ON alliance_profile_suggestions(task_id, id DESC);
+
+-- Structured, immutable reproduction captured at discovery time.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS reproduction JSONB;
