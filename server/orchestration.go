@@ -527,7 +527,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v9_contract_docs"
+	const flag = "tool_schema_refresh_v10_reproduction"
 	if v, _, err := s.m.pg.GetSetting(flag); err != nil {
 		log.Printf("[tools] read schema refresh flag: %v", err)
 		return
@@ -726,6 +726,12 @@ func (s *Server) reseedWorkerPrompt() {
 // SetFindingReportVersionByNodeID 便按 legacy 语义写 -1,漏洞详情与 Markdown 导出
 // 从此常驻「证据已变更，报告待更新」,而 UI 上没有任何入口能把它清掉。
 const reporterToolCallMessage = "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
+	"先用 context_get 读取当前漏洞 /reproduction 的现场步骤（缺少时按真实证据组织），再用 get_finding_traffic(finding_id) 读取当前证据清单及其 version（空清单是正常情况，照常写报告）；" +
+	"若运行指引启用自动绑定，在读取前先核实并关联本次漏洞的流量。节点详情使用 finding_node_id。" +
+	"最后调用 update_finding_report(finding_node_id, report, evidence_version=实际读取版本) 保存，" +
+	"evidence_version 必须传，否则报告会被永久标记为待更新。不要混用两种编号。"
+
+const reporterToolCallMessageV3 = "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
 	"先用 get_finding_traffic(finding_id) 读取当前证据清单及其 version（空清单是正常情况，照常写报告）；" +
 	"若运行指引启用自动绑定，在读取前先核实并关联本次漏洞的流量。节点详情使用 finding_node_id。" +
 	"最后调用 update_finding_report(finding_node_id, report, evidence_version=实际读取版本) 保存，" +
@@ -749,7 +755,7 @@ const reporterToolCallMessageV2 = "上面刚有一个漏洞被 report_finding �
 // 升级上来的库拿不到新文案 —— 工具 schema 由 seedFindingTrafficTools 补齐了
 // evidence_version，但没有任何东西告诉 reporter 去用它。一次性，且只覆盖未被改动的文案。
 func (s *Server) upgradeReporterTriggerMessage() {
-	const flag = "reporter_trigger_finding_node_id_v2"
+	const flag = "reporter_trigger_reproduction_v1"
 	v, _, err := s.m.pg.GetSetting(flag)
 	if err != nil {
 		log.Printf("[reporter] 读取触发器升级状态失败: %v", err)
@@ -764,7 +770,7 @@ func (s *Server) upgradeReporterTriggerMessage() {
 		return
 	}
 	for _, t := range triggers {
-		if !t.OnToolCall || (t.ToolCallMessage != reporterToolCallMessageV1 && t.ToolCallMessage != reporterToolCallMessageV2) {
+		if !t.OnToolCall || (t.ToolCallMessage != reporterToolCallMessageV1 && t.ToolCallMessage != reporterToolCallMessageV2 && t.ToolCallMessage != reporterToolCallMessageV3) {
 			continue // 用户改过或不是 finding 触发器，不动。
 		}
 		t.ToolCallMessage = reporterToolCallMessage

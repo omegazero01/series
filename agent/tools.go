@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -415,7 +417,12 @@ func readTool(name, desc string, schema map[string]any, run func(context.Context
 			if tc != nil && tc.MaxOutputChars > 0 {
 				ctx = context.WithValue(ctx, readBudgetKey{}, tc.MaxOutputChars)
 			}
+			started := time.Now()
 			res, err := run(ctx, in)
+			if retrievalTool(name) {
+				ri := RunInfoFrom(ctx)
+				log.Printf("[context-read] task=%d role=%s tool=%s elapsed_ms=%d failed=%t", ri.TaskID, ri.AgentKey, name, time.Since(started).Milliseconds(), err != nil || res.IsError)
+			}
 			return captureStructuredResult(name, res, tc), err
 		},
 	})
@@ -488,22 +495,28 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		return contextJSON(ctx, boundedGraphOverview(target.graphOverviewData(), plannerOverviewRunes, readOutputBudget(ctx), string(a.TaskID)))
+		return contextJSON(ctx, boundedGraphOverview(target.graphOverviewDataContext(ctx), plannerOverviewRunes, readOutputBudget(ctx), string(a.TaskID)))
 	})
 }
 
-// graphOverviewData computes the distilled situational snapshot shared by the
-// graph_overview tool and the planner's wake-up prompt (which pre-injects it so
-// the model needn't spend a turn calling the tool — every plan round starts with
-// an empty context and always needs this first).
+// graphOverviewData is the explicit bounded graph_overview read. Planner wakeups
+// use the separate lightweight plannerBootstrap path and never call this loader.
 func (t *ToolSet) graphOverviewData() map[string]any {
+	return t.graphOverviewDataContext(context.Background())
+}
+func (t *ToolSet) graphOverviewDataContext(ctx context.Context) map[string]any {
 	if t == nil || t.ts == nil {
 		return map[string]any{"error": "graph_overview 需要任务探索上下文，当前工具未绑定任务"}
 	}
 	local := *t
 	local.overviewReads = &overviewReadScope{states: map[int64]map[int64]string{}}
 	t = &local
-	out := map[string]any{}
+	out := map[string]any{"source_task_id": t.taskID, "is_navigation": true, "is_snapshot": true}
+	if rev, err := t.ts.GraphRevision(ctx, true); err == nil {
+		out["graph_revision"] = rev
+	} else {
+		out["revision_unavailable"] = true
+	}
 	unavailable := map[string]string{}
 	markError := func(err error, keys ...string) {
 		if err != nil {
@@ -556,65 +569,29 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// produced it. This is the relationship layer the flat lists lacked.
 	// Fold only authorized, still-cold members. Revived members remain eligible
 	// for the recent windows, which are capped independently of the hot set.
-	covered := t.authorizedCoveredMembers(t.ts, t.taskID)
-	var hotAtRender map[int64]bool
-	if len(covered) > 0 {
-		var err error
-		hotAtRender, err = t.ts.ToolHotNodeIDs(context.Background())
-		if err != nil {
-			covered = nil
-			markError(err, "folding")
-		}
-	}
-	hidden := func(id int64) bool { _, c := covered[id]; return c && !hotAtRender[id] }
+	hidden := func(int64) bool { return false } // SQL pages already exclude authorized cold folds.
 	const openIntentsCap = 30
-	frontier, frontierErr := t.ts.ToolOpenIntentPage(context.Background(), openIntentsCap)
+	frontier, frontierErr := t.ts.ToolOpenIntentPage(ctx, openIntentsCap)
 	markError(frontierErr, "frontier_open", "open_intents")
 	fr := frontier.Nodes
 	out["frontier_open"] = frontier.Total
-	all, intentsErr := t.ts.ToolNodesByKind(db.KindIntent, 300)
-	markError(intentsErr, "running_intents", "recent_done_intents", "done_intents_total", "done_intents_in_window")
-	all, intentsAuthErr := t.authorizedNodesForStore(all, t.ts, t.taskID)
-	markError(intentsAuthErr, "running_intents", "recent_done_intents", "done_intents_in_window")
-	var running, recentDone []*db.Node
-	doneTotal := 0
-	for _, n := range all {
-		switch n.State {
-		case "running":
-			running = append(running, n)
-		case "done", "blocked", "exhausted", "stopped":
-			doneTotal++
-			if hidden(n.ID) {
-				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
-			}
-			recentDone = append(recentDone, n) // newest first; cap applied below
-		}
-	}
-	// Recent terminal intents are capped below after authorization and folding.
-	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
-	// 平行命名——后者只是它的最新窗口（≤12）截断视图。两键并排即自描述："看到的是 N/总数"，
-	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
-	if t.as == nil || t.taskID <= 0 {
-		if total, err := t.ts.CountFinishedIntents(); err == nil {
-			out["done_intents_total"] = total
-		} else {
-			markError(err, "done_intents_total")
-		}
-	} else {
-		out["done_intents_in_window"] = doneTotal
+	running, intentsErr := t.ts.ToolRunningIntentPage(ctx, 31)
+	markError(intentsErr, "running_intents")
+	terminalPage, terminalErr := t.ts.ToolUnfoldedPage(ctx, db.KindIntent, 12, t.taskID)
+	markError(terminalErr, "recent_done_intents", "done_intents_total")
+	recentDone := terminalPage.Nodes
+	out["done_intents_total"] = terminalPage.Total
+	if len(running) > 30 {
+		running = running[:30]
+		out["running_intents_has_more"] = true
+		out["running_intents_read"] = map[string]any{"tool": "context_search", "args": map[string]any{"types": []string{"intent"}, "state": "running"}}
 	}
 	// findings (confirmed vulns) and facts (worker exploration results) are
 	// now distinct node kinds. recent_facts surfaces fact summaries (esp.
 	// negative results) so the planner sees them in one call; full content
 	// via node_detail(id).
-	vulnPage, vulnErr := t.ts.ToolLocalNodePage(context.Background(), db.KindFinding, 10)
-	hiddenIDs := []int64{}
-	for id := range covered {
-		if hidden(id) {
-			hiddenIDs = append(hiddenIDs, id)
-		}
-	}
-	factPage, factErr := t.ts.ToolLocalNodePageExcluding(context.Background(), db.KindFact, 20, hiddenIDs)
+	vulnPage, vulnErr := t.ts.ToolLocalNodePage(ctx, db.KindFinding, 10)
+	factPage, factErr := t.ts.ToolUnfoldedPage(ctx, db.KindFact, 20, t.taskID)
 	markError(vulnErr, "findings_total", "finding_list")
 	markError(factErr, "facts", "recent_facts")
 	vulnNodes := vulnPage.Nodes[:min(10, len(vulnPage.Nodes))]
@@ -624,7 +601,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	for id := range visible {
 		visibleIDs = append(visibleIDs, id)
 	}
-	edges, edgesErr := t.ts.EdgesWithin(visibleIDs)
+	edges, edgesErr := t.ts.EdgesWithinContext(ctx, visibleIDs)
 	markError(edgesErr, "lineage")
 	parentsOf := map[int64][]int64{}
 	yieldsOf := map[int64][]int64{}
@@ -689,7 +666,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	recentDone = recentDone[:min(recentDoneCap, len(recentDone))]
 	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
 	const coldDigestsCap = 15
-	cds, more, coldErr := t.coldDigestsRecent(t.ts, t.taskID, coldDigestsCap)
+	cds, more, coldErr := t.coldDigestsRecentContext(ctx, t.ts, t.taskID, coldDigestsCap)
 	markError(coldErr, "cold_digests", "cold_digests_more")
 	if len(cds) > 0 {
 		out["cold_digests"] = cds
@@ -709,7 +686,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// Direct source tasks are a live, read-only blackboard view. Keep their
 	// summaries in a separate field so their intents never enter this task's
 	// frontier or get mistaken for locally claimable work.
-	related, relatedErr := t.relatedTaskOverviews()
+	related, relatedErr := t.relatedTaskOverviewsContext(ctx)
 	markError(relatedErr, "related_tasks")
 	out["related_tasks"] = related
 	// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
@@ -1294,6 +1271,9 @@ func (b *overviewTextBudget) take(value any, fieldLimit int) string {
 // tasks. It intentionally reads each source's local store methods, never its own
 // related sources, so inheritance is one level only.
 func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
+	return t.relatedTaskOverviewsContext(context.Background())
+}
+func (t *ToolSet) relatedTaskOverviewsContext(ctx context.Context) ([]map[string]any, error) {
 	sources, err := t.directSourceStores()
 	if err != nil {
 		return nil, err
@@ -1307,7 +1287,7 @@ func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
 		ts := source.Store
 		// §2 cross-task: render the source task's OWN folded view — fold out the
 		// members it has already folded, and surface its cold_digests read-only.
-		hidden := t.hiddenMembersFor(ts, source.Task.TaskID)
+		hidden := func(int64) bool { return false } // source pages fold in SQL.
 		budget := overviewTextBudget{remaining: perSourceTextBudget}
 		item := map[string]any{
 			"source_task_id": source.Task.TaskID,
@@ -1325,7 +1305,14 @@ func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
 			}
 		}
 		readNodes := func(kind string, limit int) []*db.Node {
-			nodes, err := ts.ToolNodesByKind(kind, limit)
+			var nodes []*db.Node
+			var err error
+			if kind == db.KindFact {
+				page, e := ts.ToolUnfoldedPage(ctx, kind, limit, t.taskID)
+				nodes, err = page.Nodes, e
+			} else {
+				nodes, err = ts.ToolNodesByKind(kind, limit)
+			}
 			note(err, kind)
 			if err != nil {
 				return nil
@@ -1337,21 +1324,6 @@ func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
 		stats, statsErr := ts.Stats()
 		if t.as == nil {
 			note(statsErr, "node_stats")
-		}
-
-		edges, edgesErr := ts.Edges(5000)
-		note(edgesErr, "lineage")
-		parentsOf := map[int64][]int64{}
-		yieldsOf := map[int64][]int64{}
-		factFrom := map[int64]int64{}
-		for _, edge := range edges {
-			switch edge.Rel {
-			case db.RelDerivedFrom, db.RelSpawns:
-				parentsOf[edge.To] = append(parentsOf[edge.To], edge.From)
-			case db.RelYields:
-				yieldsOf[edge.From] = append(yieldsOf[edge.From], edge.To)
-				factFrom[edge.To] = edge.From
-			}
 		}
 
 		goals := readNodes(db.KindGoal, relatedOverviewMaxGoalsPerSource)
@@ -1378,8 +1350,29 @@ func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
 
 		facts := readNodes(db.KindFact, relatedOverviewMaxFactsPerSource)
 		findings := readNodes(db.KindFinding, relatedOverviewMaxFindingsPerTask)
-		intentNodes := readNodes(db.KindIntent, 300)
+		intentPage, intentPageErr := ts.ToolUnfoldedPage(ctx, db.KindIntent, relatedOverviewMaxIntentsPerTask, t.taskID)
+		note(intentPageErr, "intent")
+		intentNodes := intentPage.Nodes
 		visible := visibleNodeIDs(goals, hints, facts, findings, intentNodes)
+		edgeIDs := []int64{}
+		for id := range visible {
+			edgeIDs = append(edgeIDs, id)
+		}
+		edges, edgesErr := ts.EdgesWithinContext(ctx, edgeIDs)
+		note(edgesErr, "lineage")
+		parentsOf := map[int64][]int64{}
+		yieldsOf := map[int64][]int64{}
+		factFrom := map[int64]int64{}
+		for _, edge := range edges {
+			switch edge.Rel {
+			case db.RelDerivedFrom, db.RelSpawns:
+				parentsOf[edge.To] = append(parentsOf[edge.To], edge.From)
+			case db.RelYields:
+				yieldsOf[edge.From] = append(yieldsOf[edge.From], edge.To)
+				factFrom[edge.To] = edge.From
+			}
+		}
+
 		factFrom = restrictNodeOrigins(factFrom, visible)
 		terminalIntent := make(map[int64]bool, len(intentNodes))
 		for _, intent := range intentNodes {
@@ -1422,7 +1415,7 @@ func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
 		}
 		item["recent_facts"] = recentFacts
 
-		recentDoneRaw, terminalErr := ts.ToolTerminalIntents(relatedOverviewMaxIntentsPerTask)
+		recentDoneRaw, terminalErr := intentNodes, intentPageErr
 		if terminalErr != nil {
 			item["recent_intent_results_error"] = terminalErr.Error()
 		}
@@ -1463,7 +1456,7 @@ func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
 		}
 		// §2 cross-task: the source task's folded cold region, read-only. Members are
 		// resolvable via expand_digest(id)/node_detail(id), which search source tasks.
-		cds, more, digestErr := t.coldDigestsRecent(ts, source.Task.TaskID, relatedOverviewMaxDigestsPerSource)
+		cds, more, digestErr := t.coldDigestsRecentContext(ctx, ts, source.Task.TaskID, relatedOverviewMaxDigestsPerSource)
 		if digestErr != nil {
 			item["cold_digests_error"] = digestErr.Error()
 		} else {
@@ -1960,7 +1953,7 @@ func intentInputSchema() map[string]any {
 
 func (t *ToolSet) addIntent() actool.CoreTool {
 	return submissionTool{writeTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
-		"主 Agent 成功下发后结束本轮，Worker 自动回传总结，不轮询等待。Planner 准备新方向时主动用 context_search 查询相关意图并比较已有方向；信息足够即可提交，查询记录和分页完成度不是准入条件。Planner 对未审批候选本轮跳过；主 Agent 可明确下发待审批资产方向，但封禁和撤回仍拒绝。未知候选先批量 check_target_access。★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
+		"主 Agent 成功下发后结束本轮，Worker 自动回传总结，不轮询等待。Planner 信息足够时直接提交意图，无需先查询意图或资产；仅在信息不足时按需检索，结合已知方向及数据库去重避免重复。Planner 对未审批候选本轮跳过；主 Agent 可明确下发待审批资产方向，但封禁和撤回仍拒绝。未知候选先批量 check_target_access。★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
 		intentInputSchema(),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			t := t
@@ -2152,6 +2145,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供可验证证据。受当前任务删除禁报规则校验；命中后仅用户可解除，新证据可写事实，勿改名重报。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 ID，JSON 整数数组，如 [1,2]；不要传字符串"},
+		"reproduction":     reproductionSchema(),
 		"evidence":         str("证据/PoC 文本"),
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
@@ -2161,6 +2155,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			VulnClass, Name, Severity, Summary, Evidence string
 			IntentID                                     json.RawMessage   `json:"intent_id"`
 			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
+			Reproduction                                 json.RawMessage   `json:"reproduction"`
 			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
 			EvidenceHintID                               json.RawMessage   `json:"evidence_hint_id"`
 		}
@@ -2169,6 +2164,19 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		}
 		if t.ts == nil {
 			return actool.Errorf("report_finding 需要任务上下文；平台对话请通过 add_task_hint 向对应任务交接漏洞，并在提示中携带已有的 traffic_refs，由任务 Agent 登记。已登记漏洞可用 bind_finding_traffic 补绑。"), nil
+		}
+		reproduction, err := db.DecodeFindingReproduction(a.Reproduction)
+		if err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		if reproduction != nil {
+			if findingTrafficBindingEnabled() {
+				a.TrafficRefs = append(a.TrafficRefs, reproduction.TrafficReferences()...)
+			} else {
+				for i := range reproduction.Steps {
+					reproduction.Steps[i].TrafficRefs = nil
+				}
+			}
 		}
 		// Auto-binding off: ignore the evidence params instead of rejecting the call.
 		// stripTrafficParameters already removes them from the advertised schema, but
@@ -2185,7 +2193,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
+		input := db.RecordFindingInput{Reproduction: reproduction, TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
 		if len(input.AssetIDs) == 0 {
 			input.AssetIDs = t.ownerAssetIDs()
 		}
