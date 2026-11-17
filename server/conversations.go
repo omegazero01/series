@@ -812,6 +812,37 @@ func mergeAllRuns(items []triggeredRun) triggeredRun {
 	}
 }
 
+// triggerLLMProfilePin resolves the LLM profile a triggered conversation must
+// inherit from its source task. A trigger has no human-selected conversation
+// profile, so without this pin resolveChatAgent falls back to the global active
+// profile instead of the task's active profile. Agent-level bindings still win
+// in resolveChatAgent, preserving the documented precedence.
+func (s *Server) triggerLLMProfilePin(taskID int64) *int64 {
+	if taskID <= 0 || s.m == nil {
+		return nil
+	}
+	t, ok := s.m.Task(strconv.FormatInt(taskID, 10))
+	if !ok || t == nil {
+		// A task can be absent from the in-memory manager while its queued
+		// trigger is drained (for example after a restart). Read the persisted
+		// task only as a fallback, so normal trigger runs stay in-memory.
+		if s.m.pg != nil {
+			if pt, err := s.m.pg.GetTask(taskID); err == nil && pt != nil {
+				if pt.ActiveLLMProfileID != nil {
+					return pt.ActiveLLMProfileID
+				}
+				return pt.LLMProfileID
+			}
+		}
+		return nil
+	}
+	state := t.llmStateSnapshot()
+	if state.ActiveID != nil {
+		return state.ActiveID
+	}
+	return state.ProfileID
+}
+
 // runTriggeredRun creates the conversation for one queued fire, records the human
 // turn, and runs it synchronously (blocks until the run ends). recover keeps a
 // panic from killing the drain loop and wedging the agent's queue.
@@ -822,7 +853,7 @@ func (s *Server) runTriggeredRun(item triggeredRun) {
 		}
 	}()
 	pg := s.m.pg
-	c, err := pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
+	c, err := pg.CreateConversation(item.agentKey, firstLine(item.title, 60), s.triggerLLMProfilePin(item.taskID))
 	if err != nil {
 		log.Printf("[trigger] create conversation for %s failed: %v", item.agentKey, err)
 		return
