@@ -187,6 +187,10 @@ type Traffic struct {
 	retentionGCPending atomic.Bool
 	blobCacheMu        sync.Mutex
 	blobCache          []cachedBlob
+	// smart decides per request whether traffic to a host should exit via the
+	// proxy pool instead of dialing directly. Nil until SetSmartProxy is called;
+	// when nil or disabled the upstream callback keeps the legacy behaviour.
+	smart *SmartProxy
 }
 
 type cachedBlob struct {
@@ -273,7 +277,7 @@ func Open(dir, addr string) (*Traffic, error) {
 	// a direct dial. When a global egress proxy IS configured (SetUpstreamProxy),
 	// every captured request — intercepted AND transparently tunneled — is
 	// forwarded through it instead, so no host leaks the real source IP.
-	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) { return t.upstream.Load(), nil })
+	p.SetUpstreamProxy(t.chooseUpstream)
 	// Fail-open: MITM every host by default, EXCEPT ones a prior request proved we
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.
@@ -565,6 +569,12 @@ func (t *Traffic) authorizeTaskRequest(_ http.ResponseWriter, req *http.Request)
 	if !tagged {
 		return true, nil
 	}
+	// Propagate the identity to the upstream callback BEFORE the credential is
+	// consumed below: that callback runs later and can no longer read the header.
+	// In-place assignment is required (verified experimentally).
+	if t.smart != nil {
+		WithTaskID(req, taskID)
+	}
 	// Consume the internal tag; it must never reach the target or traffic log.
 	req.Header.Del("Proxy-Authorization")
 	if t.assets == nil {
@@ -645,6 +655,43 @@ func (t *Traffic) SetUpstreamProxy(raw string) error {
 	return nil
 }
 
+// chooseUpstream resolves which egress a captured request should use.
+//
+// Priority (matches the design doc, and is pinned by unit tests):
+//  1. smart proxy enabled AND this task marked this host → the proxy pool
+//  2. a global egress proxy is configured               → that proxy
+//  3. neither applies                                   → nil (direct dial)
+//
+// Step 2 is easy to lose: an earlier version returned nil immediately after the
+// smart check failed, which silently bypassed a configured global proxy whenever
+// the smart switch was on — while the settings UI still claimed the global proxy
+// was in effect. Keeping this as a named method makes that regression testable.
+//
+// Verified experimentally: this single callback covers BOTH plain HTTP and
+// HTTPS (both paths converge on proxy.getUpstreamProxyUrl). For HTTPS it fires
+// once per CONNECT, i.e. the decision is connection-scoped.
+func (t *Traffic) chooseUpstream(req *http.Request) (*url.URL, error) {
+	if t.smart != nil && t.smart.Enabled() {
+		host := hostOnly(req.Host)
+		if host == "" && req.URL != nil {
+			host = req.URL.Hostname()
+		}
+		if u, ok := t.smart.ShouldProxy(TaskIDFrom(req), host); ok {
+			return u, nil
+		}
+		// Not marked → fall through to the global proxy below.
+	}
+	return t.upstream.Load(), nil
+}
+
+// SetSmartProxy installs the per-request proxy selector. Nil disables the
+// feature and restores the legacy single-upstream behaviour.
+func (t *Traffic) SetSmartProxy(s *SmartProxy) { t.smart = s }
+
+// SmartProxy exposes the installed selector (nil when unset), so callers can
+// inspect or persist the marks.
+func (t *Traffic) SmartProxy() *SmartProxy { return t.smart }
+
 // ValidateProxyURL parses and checks a proxy URL (http/https/socks5, optional
 // user:pass), returning the parsed URL. Exposed so callers can validate a global
 // proxy before persisting it even when the traffic proxy itself is disabled.
@@ -664,7 +711,44 @@ func ValidateProxyURL(raw string) (*url.URL, error) {
 	if u.Host == "" {
 		return nil, fmt.Errorf("代理 %q 缺少主机地址", raw)
 	}
+	// Guard the most common misconfiguration FIRST, so the message names the real
+	// mistake: pasting a provider's "get an exit IP" API endpoint instead of the
+	// proxy endpoint. Such URLs carry an API-looking path and/or known query keys
+	// (secret_id/token/signature). Checking this before the port test matters,
+	// because those endpoints usually also omit the port — reporting "missing
+	// port" would send the user chasing the wrong problem.
+	if u.Path != "" && u.Path != "/" || looksLikeProviderAPI(u.RawQuery) {
+		return nil, fmt.Errorf("代理 %q 看起来是「取 IP 的 API 地址」而非代理服务器地址；"+
+			"请填 协议://[账号:密码@]主机:端口（例如 socks5://user:pass@host:15818）", raw)
+	}
+	// A proxy address must name a host AND a port. Reproduced experimentally: a
+	// URL without a port parses fine but makes go-mitmproxy's dial fail instantly
+	// with "missing port in address", surfacing to agents as an empty 502 within
+	// milliseconds — indistinguishable from a WAF block, so a malformed proxy
+	// config looks like an unreachable target. Catch it here instead.
+	if _, _, err := net.SplitHostPort(u.Host); err != nil {
+		return nil, fmt.Errorf("代理 %q 缺少端口(应形如 协议://[账号:密码@]主机:端口)", raw)
+	}
 	return u, nil
+}
+
+// looksLikeProviderAPI reports whether a query string carries the credential
+// keys used by proxy providers' "get exit IP" endpoints (快代理 gettps,
+// 芝麻/讯代理 etc.), which is a strong signal the user pasted the wrong URL.
+func looksLikeProviderAPI(rawQuery string) bool {
+	if rawQuery == "" {
+		return false
+	}
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return false
+	}
+	for _, k := range []string{"secret_id", "secret_key", "signature", "format", "sep", "num"} {
+		if _, ok := q[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // CACertPath returns the PEM CA cert clients must trust to verify HTTPS through
@@ -773,10 +857,16 @@ func (t *Traffic) record(f *mproxy.Flow) {
 	url := f.Request.URL.String()
 	reqHead := fmt.Sprintf("%s %s %s\n%s", method, f.Request.URL.RequestURI(), f.Request.Proto, requestHeaderLines(f.Request))
 	respHead := fmt.Sprintf("HTTP %d\n%s", f.Response.StatusCode, headerLines(f.Response.Header))
+	// Store the bytes exactly as captured, but use the decoded view for text
+	// detection, previews and the full-text index. Content-Encoding is often
+	// br/gzip/zstd, and indexing or showing the compressed bytes as text makes
+	// otherwise readable API responses useless.
+	reqIndex := decodeHTTPBody(reqHead, f.Request.Body)
+	respIndex := decodeHTTPBody(respHead, f.Response.Body)
 	// Bodies are spilled before the transaction opens: blob writes are filesystem
 	// work and must not sit inside the SQLite write lock.
-	reqB := t.spill(f.Request.Body, f.Request.Header.Get("Content-Type"))
-	respB := t.spill(f.Response.Body, ct)
+	reqB := t.spillWithIndex(f.Request.Body, f.Request.Header.Get("Content-Type"), reqIndex)
+	respB := t.spillWithIndex(f.Response.Body, ct, respIndex)
 
 	tx, err := t.db.Begin()
 	if err != nil {
@@ -849,15 +939,32 @@ type storedBody struct {
 // independent of where the bytes end up, and both storage forms are compressed
 // (see compress.go) while the index still gets the in-memory plaintext.
 func (t *Traffic) spill(body []byte, contentType string) storedBody {
+	return t.spillWithIndex(body, contentType, body)
+}
+
+// spillWithIndex stores body exactly as captured while using indexBody (the
+// Content-Encoding-decoded view) for text detection, previews and the full-text
+// index. Keeping the raw bytes preserves evidence/replay fidelity; decoding only
+// the index and preview makes compressed JSON searchable and readable.
+func (t *Traffic) spillWithIndex(body []byte, contentType string, indexBody []byte) storedBody {
 	if len(body) == 0 {
 		return storedBody{}
 	}
-	text := !isBinaryBody(contentType, body)
+	if len(indexBody) == 0 {
+		indexBody = body
+	}
+	text := !isBinaryBody(contentType, indexBody)
 	indexText := func() string {
 		if !text {
 			return ""
 		}
-		return string(clipBytes(body, maxIndexBody))
+		return string(clipBytes(indexBody, maxIndexBody))
+	}
+	preview := func() []byte {
+		if text {
+			return []byte(truncateUTF8(indexBody, blobPreview))
+		}
+		return clipBytes(body, blobPreview)
 	}
 	if len(body) <= maxInlineBody {
 		return storedBody{inline: compressInline(body), index: indexText()}
@@ -872,7 +979,7 @@ func (t *Traffic) spill(body []byte, contentType string) storedBody {
 	blobDir := filepath.Join(t.dir, "_blobs", "sha256", h[:2])
 	if err := os.MkdirAll(blobDir, 0o755); err != nil {
 		log.Printf("[traffic] 创建 blob 目录失败：%v", err)
-		return storedBody{inline: compressInline(clipBytes(body, blobPreview)), index: indexText()}
+		return storedBody{inline: compressInline(preview()), index: indexText()}
 	}
 	packed, compressed := encodeBlob(body)
 	ext := ".bin"
@@ -888,13 +995,13 @@ func (t *Traffic) spill(body []byte, contentType string) storedBody {
 		if _, altErr := os.Stat(filepath.Join(blobDir, h+other)); altErr != nil {
 			if err := os.WriteFile(blobPath, packed, 0o644); err != nil {
 				log.Printf("[traffic] 写 blob %s 失败：%v", h, err)
-				return storedBody{inline: compressInline(clipBytes(body, blobPreview)), index: indexText()}
+				return storedBody{inline: compressInline(preview()), index: indexText()}
 			}
 		}
 	}
 	sb := storedBody{hash: h, index: indexText()}
 	if text {
-		sb.inline = compressInline([]byte(truncateUTF8(body, blobPreview)))
+		sb.inline = compressInline(preview())
 	} else {
 		sb.inline = []byte(binaryTag(contentType, body))
 	}
@@ -1374,6 +1481,16 @@ FROM exchange_bodies b JOIN exchanges e ON e.id=b.id WHERE b.id=?`, id).
 		Scan(&reqHead, &reqBody, &reqBlob, &respHead, &respBody, &respBlob, &reqLen, &respLen)
 	if err == nil {
 		reqBody, respBody = decompressInline(reqBody), decompressInline(respBody)
+		// Inline bodies are stored exactly as captured, so apply HTTP
+		// Content-Encoding here as well as at index time. A spilled body's
+		// inline column is already a decoded preview; its blob pointer is left
+		// untouched.
+		if !reqBlob.Valid || reqBlob.String == "" {
+			reqBody = decodeHTTPBody(reqHead, reqBody)
+		}
+		if !respBlob.Valid || respBlob.String == "" {
+			respBody = decodeHTTPBody(respHead, respBody)
+		}
 		return assembleRaw(reqHead, reqBody, reqBlob, reqLen), assembleRaw(respHead, respBody, respBlob, respLen), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {

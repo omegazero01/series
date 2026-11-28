@@ -600,7 +600,8 @@ export interface Finding {
   status: FindingStatus;
   summary: string;
   evidence: string;
-  report?: string; // 详细报告(Markdown);仅详情接口返回,列表为空
+  report?: string; // 人类提交版(Markdown);仅详情接口返回,列表为空
+  report_detail?: string; // 完整技术明细(Markdown);内部检索用,不导出
   intent_id?: string;
   param_id?: string;
   task_id?: string;
@@ -1016,6 +1017,30 @@ export interface TrafficHost {
 }
 
 // ---- App settings (runtime toggles) ----
+export interface PlannerOverviewLimits {
+  budget_runes: number;
+  goals: number;
+  recent_facts: number;
+  findings: number;
+  recent_done_intents: number;
+  hints: number;
+  cold_digests: number;
+}
+
+export interface PlannerOverviewConfig {
+  full: PlannerOverviewLimits;
+  lean: PlannerOverviewLimits;
+}
+
+// 上下文压缩的两条线（单位 token）。字段留空或 0 = 沿用底座按窗口推导的默认值。
+// clear_* 是无损的工具输出清理线（正文可重新读取）；summary_* 是有损的历史摘要线。
+export interface ContextPolicyConfig {
+  clear_after_tokens?: number;
+  keep_recent_tool_results?: number;
+  summary_after_tokens?: number;
+  keep_recent_messages?: number;
+}
+
 export interface ModelRequestLimits {
   concurrency: number;
   queue: number;
@@ -1031,6 +1056,7 @@ export interface ModelRequestDeadlines {
 export interface ModelRequestBytes {
   request_mib: number;
   response_mib: number;
+
 }
 
 export interface Settings {
@@ -1065,6 +1091,12 @@ export interface Settings {
   // 全局出口代理(http/https/socks5，可带 user:pass)，所有目标流量走它。开启流量捕获时作为
   // MITM 上游；关闭捕获时直接注入 agent 的 bash/WebFetch。空=直连。
   global_proxy?: string;
+  // 智能代理：按请求决定是否走代理池（默认关）。仅对被标记的主机生效。
+  smart_proxy?: boolean;
+  // 智能代理使用的代理池地址；空=已标记主机仍直连。
+  smart_proxy_pool?: string;
+  // 已被标记为经代理池访问的主机（任务级）。
+  smart_proxy_hosts?: SmartProxyHost[];
   shell_detected?: {
     ok: boolean;
     os?: string;
@@ -1090,6 +1122,23 @@ export interface Settings {
   // worker/主 agent/对话)由 noa 接管上下文压缩,取代内置 compaction;每 run 读一次,对
   // 之后启动的 run 生效。
   noa_compaction?: boolean;
+  // 实验功能:Planner 每轮预注入的态势窗口(默认 full)。lean 只注入目标、frontier、
+  // 最近事实和读取入口,细节由 Planner 按需检索。
+  planner_overview_mode?: "full" | "lean";
+  // 完整/精简两套可编辑数值；缺省字段由服务端回退到内置默认值。
+  planner_overview_config?: PlannerOverviewConfig;
+  // 上下文压缩两条线（清理线/摘要线）与保留条数；缺省或 0 字段由服务端回退到
+  // 底座按窗口推导的默认值。每 run 读一次，保存后对之后启动的 run 生效。
+  context_policy_config?: ContextPolicyConfig;
+}
+
+export interface SmartProxyHost {
+  host: string;
+  reason: string;
+  source: "ai" | "manual" | string;
+  task_id: number;
+  agent_key: string;
+  added_at: string;
 }
 
 export interface GlobalProxyProbeResult {

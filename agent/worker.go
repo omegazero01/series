@@ -80,6 +80,8 @@ type Worker struct {
 	// extraTools are host-provided tools (e.g. traffic query, oast) appended to
 	// the worker's graph write-back tools.
 	extraTools []actool.CoreTool
+	// smart backs mark_host_proxy / check_host_proxy. Nil = feature off.
+	smart SmartProxyView
 	// injectConstraints resolves whether this task's operation constraints get
 	// injected into the worker system prompt. Read per request so the settings toggle
 	// takes effect without rebuilding the agent. nil = inject (default).
@@ -92,6 +94,7 @@ type Worker struct {
 	// compression mechanism. Read per run, like nonStreaming. nil = off (built-in
 	// compaction).
 	noaEnabledFn func() bool
+	ctxPolicyFn  func() ContextPolicyConfig // resolver: 自定义上下文线(清理/摘要)，nil = 内置窗口推导
 	// maxTokensFn resolves the per-reply output cap in tokens, on the same
 	// per-run basis. nil or 0 = send no cap and let the endpoint decide.
 	maxTokensFn func() int
@@ -163,6 +166,12 @@ func (w *Worker) nonStreaming() bool { return w.nonStreamingFn != nil && w.nonSt
 // run so the settings toggle takes effect without rebuilding the agent.
 func (w *Worker) SetNoaEnabled(fn func() bool) { w.noaEnabledFn = fn }
 
+// SetContextPolicy wires a resolver returning the custom context lines (tool-result
+// clear line / history summary line). nil or all-zero = keep the SDK's window-derived
+// defaults, i.e. behaviour identical to before this feature. Read per run, so a
+// settings change takes effect on the next run without rebuilding the agent.
+func (w *Worker) SetContextPolicy(fn func() ContextPolicyConfig) { w.ctxPolicyFn = fn }
+
 // SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
 func (w *Worker) SetMaxTokens(fn func() int) { w.maxTokensFn = fn }
@@ -232,6 +241,10 @@ func (w *Worker) SetProxy(addr, caCert string) {
 }
 
 func (w *Worker) SetTrafficRecording(enabled bool) { w.trafficRecording = enabled }
+
+// SetSmartProxy installs the per-request proxy selector so the worker's
+// mark_host_proxy / check_host_proxy tools can operate.
+func (w *Worker) SetSmartProxy(s SmartProxyView) { w.smart = s }
 
 // SetWebSearch selects the web_search backend for this worker (off by default).
 func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
@@ -488,6 +501,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
+	tsx.SetSmartProxy(w.smart) // 智能代理：允许 worker 标记被拦截的主机
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)
 	if as != nil {
@@ -500,8 +514,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// prompt can use the shell-specific path (notably /mnt/c/... for WSL).
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
-	// then augment with the agent's visible skills/MCP. During the SDK settlement
-	// phase, Bash is hidden and execution-gated via Settlement.DisabledTools.
+	// then augment with the agent's visible skills/MCP. The tool list stays identical
+	// for the whole run — during the SDK settlement phase Bash is refused in the hook
+	// (settleGuard) instead of being hidden, which would invalidate the prompt cache.
 	tsx.workerExecution = true
 	base := append(tsx.WorkerTools(), w.extraTools...)
 	// Worker 需要本地读写与 Bash，但不会派后台任务；Sleep 只为后台任务轮询服务，
@@ -520,6 +535,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if err := requireRoleTools("worker", tools); err != nil {
 		return harness.ReasonAbortedTools, WriteCounts{}, err
 	}
+	if w.mem != nil {
+		// Memory catalogue/search/read: norma's RecallMemory is English-token
+		// only and the MEMORY.md index is not injected, so the worker otherwise
+		// cannot discover Chinese-titled or non-keyword memories.
+		tools = append(tools, memoryCatalogTools(w.mem)...)
+	}
 
 	// Keep a bounded mandate and identity in system. Long instructions remain
 	// available through typed node fields, never as repeated full payload JSON.
@@ -533,10 +554,19 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if w.trafficRecording {
 		promptCACert = w.proxyCACert
 	}
+	intentText := renderIntentTask(intent)
 	sysBody := workerSystem(runProxyAddr, promptCACert, w.workDir, runDir)
-	// Operation constraints are refreshed before every model request.
+	if w.mem != nil {
+		sysBody += memoryUsageHint
+		sysBody += HostPinnedNote(w.mem)
+		sysBody += memoryRelevantNote(w.mem, string(intent.Payload), 3)
+	}
+	if w.smart != nil {
+		sysBody += smartProxyRule // 智能代理:何时把被拦截的主机切到代理池
+	}
+
 	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
-	sysBody += renderIntentTask(intent)
+	sysBody += intentText
 	if as != nil {
 		if len(intentAssets) > 0 {
 			// Reuse the already-validated lineage. Parent-only targets must not
@@ -590,9 +620,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
-	settle := wrapupSettlement("worker", []string{"Bash"})
+	settle := wrapupSettlement("worker")
 	if tc.DeadlineUnix > 0 {
-		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
+		settle = wrapupSettlementForTask("worker", clamped)
 	}
 	workerTodos, todoErr := loadWorkerTodos(runDir, taskID, intent.ID)
 	if todoErr != nil {
@@ -631,7 +661,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
 		MaxDuration: maxDur,
-		// 命中预算(轮次 OR 时长)→ SDK 跑一轮收尾(隐藏 Bash),把已识别的写回,避免烂尾。
+		// 命中预算(轮次 OR 时长)→ SDK 跑一轮收尾,把已识别的写回,避免烂尾。
+		// 收尾期不再隐藏 Bash，而是由 newSession 的 settleGuard 拒其执行：
+		// 工具清单一变就破坏请求前缀，整段对话要按全价重算（实测占任务成本 5~6%）。
 		// clamped(被任务 deadline 夹逼)时用 PromptByReason:因超时=任务到点→任务超时词,
 		// 因步数=夹逼窗口内步数先耗尽→回落 per-run 词。非 clamped 维持纯 per-run。
 		Settlement: settle,
@@ -643,9 +675,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		NonStreaming:  w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:     w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
 	}
-	if w.mem != nil {
-		opts.Memory = &agentcore.MemoryOptions{Store: w.mem, AutoInject: false, MaxInject: 3}
-	}
+	// Memory: instead of the SDK's MemoryOptions (English-token recall, no index,
+	// slug() collapses pure-Chinese names), this worker uses SERIES' own
+	// RecallMemory/RecordMemory/List/Search/Read tools plus pinned + relevant
+	// system-prompt notes. w.mem is still the shared store, so files stay
+	// compatible with the rest of norma.
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
 	}
@@ -674,8 +708,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		opts.Compaction.MaxOutputTokens = opts.MaxTokens
 	}
 	enableNoa(&opts, w.noaEnabledFn, w.workDir, noaSession, noaWarn(noaSession))
+	// 自定义上下文线（清理/摘要），未配置时保持内置窗口推导。
+	applyContextPolicy(&opts, w.ctxPolicyFn, w.compactionWindow())
 	ctx = attachSideCapture(ctx, &opts)
-	s, closeSession, err := newSession(opts)
+	s, closeSession, err := newSession(opts, "Bash")
 	if err != nil {
 		return "", tsx.Writes(), err
 	}

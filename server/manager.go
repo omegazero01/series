@@ -292,6 +292,10 @@ type Manager struct {
 	// capture is on it becomes the MITM's upstream; when capture is off it is
 	// injected into agent bash env / WebFetch directly. See ProxyAddr.
 	globalProxy string
+	// smartProxyPool is the egress proxy used for hosts the agent marked as
+	// WAF-blocked; smart is the per-request resolver behind mark_host_proxy.
+	smartProxyPool string
+	smart          *traffic.SmartProxy
 }
 
 // Settings keys the UI toggles at runtime.
@@ -330,6 +334,15 @@ const (
 	// agent(planner/worker/主 agent/对话)由 noa 接管上下文压缩,取代内置 compaction。
 	// 每 run 读一次,切换只影响之后启动的 run。
 	settingNoaCompaction = "noa_compaction"
+	// 实验功能:Planner 每轮预注入的态势窗口。full=当前完整窗口;lean=只注入目标、
+	// frontier、最近事实和读取入口。图/权限/审计不变;每轮读取,切换即时生效。
+	settingPlannerOverviewMode = "planner_overview_mode"
+	// Planner 态势窗口的完整/精简数值。存 JSON，零值表示使用内置默认值；
+	// 每轮读取，修改在下一轮规划生效。
+	settingPlannerOverviewConfig = "planner_overview_config"
+	// 上下文压缩的两条线（工具输出清理线 / 历史摘要线）。存 JSON，零值=用内置
+	// 窗口推导；每 run 读一次，对之后启动的 run 生效。
+	settingContextPolicyConfig = "context_policy_config"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
 	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
@@ -416,6 +429,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if err := agent.ConfigureToolUA(filepath.Join(dir, "tool-http")); err != nil {
 		log.Printf("[manager] curl/wget 默认 UA 配置失败（不影响启动）：%v", err)
 	}
+	// Host lessons: failed Bash/DSL calls are distilled into <data>/host/lessons.json
+	// and surfaced in the Bash / asset_search descriptions on the next run.
+	agent.ConfigureHostLessons(filepath.Join(dir, "host", "lessons.json"))
 	dsn, source, err := pgdb.DSN()
 	if err != nil {
 		return nil, err
@@ -529,6 +545,45 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
 			log.Printf("[proxy] 全局代理 %q 无效，已忽略: %v", m.globalProxy, err)
 		}
+	}
+	// Smart proxy: per-request selection of the proxy pool for hosts the agent
+	// marked as WAF-blocked. Built after the global proxy so the two coexist
+	// (the smart list takes precedence for marked hosts).
+	m.smart = traffic.NewSmartProxy()
+	if v, ok, _ := pg.GetSetting(settingSmartProxyPool); ok {
+		m.smartProxyPool = strings.TrimSpace(v)
+		if err := m.smart.SetPool(m.smartProxyPool); err != nil {
+			log.Printf("[smart-proxy] 代理池 %q 无效，已忽略: %v", m.smartProxyPool, err)
+		}
+	}
+	if raw, ok, _ := pg.GetSetting(settingSmartProxyHosts); ok && strings.TrimSpace(raw) != "" {
+		var hosts []traffic.SmartProxyHost
+		if err := json.Unmarshal([]byte(raw), &hosts); err != nil {
+			log.Printf("[smart-proxy] 名单 JSON 无效，已忽略: %v", err)
+		} else {
+			for _, h := range hosts {
+				m.smart.Mark(h.TaskID, h.Host, h.Reason, h.Source, h.AgentKey)
+			}
+		}
+	}
+	if pg.GetBool(settingSmartProxy, false) {
+		m.smart.SetEnabled(true)
+	}
+	// Persist on every mutation. Without this hook, a mark made by an agent lived
+	// only in memory: after a restart the list was empty, marked hosts silently
+	// reverted to direct dialing, and the failure looked like a broken proxy.
+	m.smart.SetOnChange(func(hosts []traffic.SmartProxyHost) {
+		raw, err := json.Marshal(hosts)
+		if err != nil {
+			log.Printf("[smart-proxy] 序列化名单失败: %v", err)
+			return
+		}
+		if err := m.pg.SetSetting(settingSmartProxyHosts, string(raw)); err != nil {
+			log.Printf("[smart-proxy] 保存名单失败: %v", err)
+		}
+	})
+	if m.traffic != nil {
+		m.traffic.SetSmartProxy(m.smart)
 	}
 	m.enrich = enrich.New(m.assets, m.ProxyAddr, 4)
 	// Reconcile the seeded Playwright MCP with the persisted capture state, so a
@@ -697,6 +752,109 @@ func (m *Manager) NoaCompactionEnabled() bool {
 // the resolver reads it per run, so no rebuild is needed.
 func (m *Manager) SetNoaCompaction(on bool) error {
 	return m.pg.SetBool(settingNoaCompaction, on)
+}
+
+// PlannerOverviewMode returns "full" or "lean" for the planner's per-round
+// situation projection. Default is full. SERIES_PLANNER_OVERVIEW lets an
+// isolated test instance force a mode without touching its database.
+func (m *Manager) PlannerOverviewMode() string {
+	if v := strings.TrimSpace(os.Getenv("SERIES_PLANNER_OVERVIEW")); v != "" {
+		if strings.EqualFold(v, "lean") {
+			return "lean"
+		}
+		return "full"
+	}
+	v, ok, err := m.pg.GetSetting(settingPlannerOverviewMode)
+	if err != nil || !ok {
+		return "full"
+	}
+	if strings.EqualFold(strings.TrimSpace(v), "lean") {
+		return "lean"
+	}
+	return "full"
+}
+
+// SetPlannerOverviewMode persists the experimental planner projection mode.
+// The planner reads it per round, so no agent rebuild is needed.
+func (m *Manager) SetPlannerOverviewMode(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != "full" && mode != "lean" {
+		return fmt.Errorf("planner_overview_mode 必须是 full 或 lean")
+	}
+	return m.pg.SetSetting(settingPlannerOverviewMode, mode)
+}
+
+// PlannerOverviewConfig returns the editable numerical limits for both
+// presets. Missing/corrupt JSON falls back to the built-in defaults. When
+// SERIES_PLANNER_OVERVIEW is set (isolated benchmark), custom values are
+// ignored so the A/B comparison is deterministic.
+func (m *Manager) PlannerOverviewConfig() agent.OverviewConfig {
+	if v := strings.TrimSpace(os.Getenv("SERIES_PLANNER_OVERVIEW")); v != "" {
+		return agent.DefaultOverviewConfig()
+	}
+	raw, ok, err := m.pg.GetSetting(settingPlannerOverviewConfig)
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return agent.DefaultOverviewConfig()
+	}
+	var cfg agent.OverviewConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		log.Printf("[settings] planner_overview_config 解析失败，使用默认值: %v", err)
+		return agent.DefaultOverviewConfig()
+	}
+	return cfg.Normalize()
+}
+
+// SetPlannerOverviewConfig validates and persists both presets. The planner
+// reads the normalized value once per planning round.
+func (m *Manager) SetPlannerOverviewConfig(cfg agent.OverviewConfig) error {
+	if err := agent.ValidateOverviewConfig(cfg); err != nil {
+		return err
+	}
+	cfg = cfg.Normalize()
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return m.pg.SetSetting(settingPlannerOverviewConfig, string(raw))
+}
+
+// ContextPolicyConfig returns the custom context-compression lines (tool-result
+// clear line / history summary line). Missing, corrupt or env-locked values fall
+// back to the built-in window-derived defaults, so an unconfigured install keeps
+// the exact previous behaviour. When SERIES_CONTEXT_POLICY is set (isolated
+// benchmark) custom values are ignored so an A/B run is deterministic.
+func (m *Manager) ContextPolicyConfig() agent.ContextPolicyConfig {
+	if agent.ContextPolicyEnvLocked() {
+		return agent.DefaultContextPolicyConfig()
+	}
+	if m.pg == nil {
+		return agent.DefaultContextPolicyConfig()
+	}
+	raw, ok, err := m.pg.GetSetting(settingContextPolicyConfig)
+	if err != nil || !ok {
+		return agent.DefaultContextPolicyConfig()
+	}
+	cfg, _ := agent.ParseContextPolicy(raw)
+	return cfg
+}
+
+// SetContextPolicyConfig validates and persists the custom lines. Agents read the
+// normalized value once per run, so a change applies to the next run without
+// rebuilding the LLM chain.
+func (m *Manager) SetContextPolicyConfig(cfg agent.ContextPolicyConfig) error {
+	if err := agent.ValidateContextPolicyConfig(cfg); err != nil {
+		return err
+	}
+	cfg = cfg.Normalize()
+	if cfg.IsZero() {
+		// 全零 = 恢复内置默认：直接清掉设置键，避免留下一个"看着像配置"的空对象。
+		return m.pg.SetSetting(settingContextPolicyConfig, "")
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return m.pg.SetSetting(settingContextPolicyConfig, string(raw))
 }
 
 // LLMPoolEnabled reports whether LLM failover ("轮询") is on (默认关；
@@ -1736,6 +1894,9 @@ func (m *Manager) DeleteTask(id string, opts DeleteTaskOptions) (DeleteTaskResul
 		}
 	}
 	m.forgetTask(id, n)
+	// Task-scoped smart-proxy marks must not outlive a genuinely deleted task, or
+	// they linger in the settings list with no task to remove them by.
+	m.clearSmartProxyMarks(n)
 	if err := errors.Join(finalizeErrs...); err != nil {
 		return result, &taskDeleteCommittedError{err: err}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -38,14 +39,23 @@ type Planner struct {
 	injectConstraints func(context.Context) (bool, error)    // request-scoped policy resolver; nil = enabled
 	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	ctxPolicyFn       func() ContextPolicyConfig             // resolver: 自定义上下文线(清理/摘要)，nil = 内置窗口推导
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	overviewProfileFn func() OverviewProfile                 // resolver: full/lean situation projection (nil = full)
+	overviewConfigFn  func() OverviewConfig                  // resolver: editable per-profile limits (nil = defaults)
 	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
 
-	// Full todos live only in PostgreSQL. This bounded cache stores navigation
-	// text, validated against live source metadata on every planning round.
-	todoMu           sync.Mutex
+	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
+	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
+	// session, but the shared store lets it record a serial exploit chain once and
+	// dispatch it step-by-step over rounds instead of front-loading it in parallel.
+	todoMu sync.Mutex
+	todos  map[int64]*actool.TodoStore
+	// smart backs mark_host_proxy / check_host_proxy. Nil = feature off.
+	smart SmartProxyView
 	todoPreviewClock uint64
 	todoPreviews     map[int64]plannerTodoCached
+
 }
 
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
@@ -58,6 +68,30 @@ func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
 // planner wake-up to advance the round counter, maintain cold stamps, and
 // (off the hot path) fold cold nodes into digests. nil = feature disabled.
 func (p *Planner) SetCompactor(c *Compactor) { p.compactor = c }
+
+// SetOverviewProfile wires the full/lean projection resolver. It is read once
+// per planning round, so a settings change takes effect on the next wake-up
+// without rebuilding the planner. nil/unset = full (current behavior).
+func (p *Planner) SetOverviewProfile(fn func() OverviewProfile) { p.overviewProfileFn = fn }
+
+func (p *Planner) overviewProfile() OverviewProfile {
+	if p.overviewProfileFn != nil && p.overviewProfileFn() == OverviewLean {
+		return OverviewLean
+	}
+	return OverviewFull
+}
+
+// SetOverviewConfig wires the editable full/lean projection limits. Like the
+// mode resolver, it is read once per planning round so a settings change takes
+// effect on the next wake-up without rebuilding the planner.
+func (p *Planner) SetOverviewConfig(fn func() OverviewConfig) { p.overviewConfigFn = fn }
+
+func (p *Planner) overviewConfig() OverviewConfig {
+	if p.overviewConfigFn == nil {
+		return DefaultOverviewConfig()
+	}
+	return p.overviewConfigFn().Normalize()
+}
 
 // MaintainGraph runs independently of model planning on a code-only heartbeat.
 func (p *Planner) MaintainGraph(ctx context.Context, ts *db.ExplorationStore) {
@@ -74,6 +108,12 @@ func (p *Planner) nonStreaming() bool { return p.nonStreamingFn != nil && p.nonS
 // context-compression mechanism. nil/unset = off (built-in compaction). Read per
 // run so the settings toggle takes effect without rebuilding the agent.
 func (p *Planner) SetNoaEnabled(fn func() bool) { p.noaEnabledFn = fn }
+
+// SetContextPolicy wires a resolver returning the custom context lines (tool-result
+// clear line / history summary line). nil or all-zero = keep the SDK's window-derived
+// defaults, i.e. behaviour identical to before this feature. Read per run, so a
+// settings change takes effect on the next run without rebuilding the agent.
+func (p *Planner) SetContextPolicy(fn func() ContextPolicyConfig) { p.ctxPolicyFn = fn }
 
 // SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
@@ -130,6 +170,10 @@ func (p *Planner) SetKillWork(fn IntentStopper) { p.killWork = fn }
 // steer_work tool can inject a mid-run course-correction into a running worker.
 func (p *Planner) SetSteerWork(fn func(intentID int64, msg string) error) { p.steerWork = fn }
 
+// SetSmartProxy installs the per-request proxy selector so the planner's
+// mark_host_proxy / check_host_proxy tools can operate.
+func (p *Planner) SetSmartProxy(s SmartProxyView) { p.smart = s }
+
 // renderPlannerTodos formats the persistent planning todo for injection into the
 // wake-up prompt (empty when there are no todos yet — first wake-up).
 func renderPlannerTodos(items []actool.Todo) string { return plannerTodoPreview(items) }
@@ -160,6 +204,82 @@ type TriggerEvent struct {
 	Hints      []string // Kind=="hint" 专用：本次 add_hint 新增的提示文本（1 条或多条）
 }
 
+// renderPlannerOverview folds the pre-computed graph_overview snapshot into the
+// wake-up prompt so the planner starts each round with a bounded situation in
+// hand, saving the round-trip it would otherwise spend fetching an overview. The
+// lightweight tagged projection is bounded; full persisted detail remains one
+// tool call away (context_get / context_search / …).
+//
+// OverviewLean is a narrower agent-facing projection: the graph itself is
+// unchanged, but the planner receives only the goal, frontier, recent facts,
+// active hints and section read pointers. Full remains the default.
+func renderPlannerOverview(data map[string]any, profile OverviewProfile, opts ...OverviewRenderOptions) string {
+	const prefix = "\n\n【本轮态势：有界窗口，未展示不代表不存在；sections 提供遗漏状态和读取入口】：\n<graph_overview>\n"
+	const suffix = "\n</graph_overview>"
+	var options OverviewRenderOptions
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	config := options.Config.Normalize()
+	limits := config.LimitsFor(profile)
+	source := data
+	budget := limits.BudgetRunes
+	if profile == OverviewLean {
+		source = leanGraphOverviewData(data, LeanOptions{Limits: limits, Focus: options.Focus})
+	} else {
+		source = trimGraphOverviewData(data, limits)
+	}
+	view := boundedGraphOverview(source, budget-len([]rune(prefix+suffix)), 0)
+	// If the lean projection cannot even fit its metadata, fall back to the
+	// unexpanded base window for this round rather than handing the planner an
+	// empty situation. The next round retries lean.
+	if profile == OverviewLean && view["context_unavailable"] == true {
+		fallback := data
+		if options.Base != nil {
+			fallback = options.Base
+		}
+		fullLimits := config.Full
+		view = boundedGraphOverview(trimGraphOverviewData(fallback, fullLimits), fullLimits.BudgetRunes-len([]rune(prefix+suffix)), 0)
+	}
+	body, _ := json.Marshal(view)
+	return prefix + string(body) + suffix
+}
+
+const leanOverviewGuidance = "\n\n【本轮态势模式：lean】\n本轮只预注入目标、frontier、最近事实、active hints 和计数。未展示的 facts/findings/历史意图不代表不存在。信息不足时先用 context_search / context_get 查询，再判断目标或派意图；不要凭概览摘要猜测完整证据。"
+
+// factSelectionEnabled defaults to on for the lean experiment; an operator can
+// disable it with SERIES_PLANNER_FACT_SELECTION=off for a clean A/B baseline.
+func factSelectionEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SERIES_PLANNER_FACT_SELECTION"))) {
+	case "off", "false", "0", "no":
+		return false
+	default:
+		return true
+	}
+}
+
+// positiveTriggerIntentIDs only treats new information (done/finding) as a
+// positive focus. A cancelled direction must not pull its old facts back into
+// the window; goal/hint/finding_deleted events have no intent focus.
+func positiveTriggerIntentIDs(triggers []TriggerEvent) []int64 {
+	seen := map[int64]struct{}{}
+	out := make([]int64, 0, len(triggers))
+	for _, ev := range triggers {
+		if ev.IntentID <= 0 {
+			continue
+		}
+		if ev.Kind != "done" && ev.Kind != "finding" {
+			continue
+		}
+		if _, ok := seen[ev.IntentID]; ok {
+			continue
+		}
+		seen[ev.IntentID] = struct{}{}
+		out = append(out, ev.IntentID)
+	}
+	return out
+}
+
 // plannerDefaultTmpl is the built-in EDITABLE body (段 [A]) of the planner prompt,
 // seeded into agent_prompts. Goal is a {{.Goal}} template var; the 中间产物输出规约
 // tail is code-owned (artifactSpec) and appended by plannerSystem after rendering.
@@ -180,6 +300,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
    - 对负面或存疑事实，读取 /evidence 核实手段及 confidence；必要时只派一次复核，避免反复验证已确认的否定结论。
    - 已有信息足以确定可执行方向时，直接用 add_intent 提交，无需先查询意图或资产。结合已知的排队、运行及历史方向避免重复；仅在信息不足、需要确认历史进度或资产身份时按需读取。has_more 仅表示结果未展示完，不要求提交前查完分页。
    - 已知且当前可用的资产 ID 直接用于 add_intent.asset_ids；仅资产身份不明确时用 asset_search，缺少详细字段时才用 asset_get。优先复用已知授权信息，不重复查询相同内容。
+   - 本轮输入同时可能附有【graph_overview】有界窗口（设置里可选完整/精简）；窗口内的字段同样不是全量，缺展示按需检索。
 
 2. **判目标（核心职责）**：依据已有目标和实测证据判断；目标正文或证据不足时再按需读取。对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
    - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】按需读取核对实测证据（覆盖度需要时可显式调用 graph_overview）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
@@ -247,6 +368,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 		tsx.SetAssetStore(as, as.Companies())
 	}
 	tsx.SetTaskID(taskID)
+	tsx.SetSmartProxy(p.smart) // 智能代理：允许 planner 标记被拦截的主机
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
 	tsx.killWork = p.killWork   // enable kill_work tool (nil = unavailable)
 	tsx.steerWork = p.steerWork // enable steer_work tool (nil = unavailable)
@@ -307,7 +429,27 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 			cancelled += fmt.Sprintf("此前用户取消原因：%s；不要创建同方向替代工作。", p.Reason)
 		}
 	}
-	situational := cancelled + tsx.plannerBootstrap(ctx, triggers)
+	profile := p.overviewProfile()
+	config := p.overviewConfig()
+	overviewBase := tsx.graphOverviewData()
+	overview := overviewBase
+	var focus *OverviewFocus
+	if profile == OverviewLean && factSelectionEnabled() {
+		f := OverviewFocus{TriggerIntentIDs: positiveTriggerIntentIDs(triggers)}
+		focus = &f
+		overview = tsx.expandOverviewFacts(overviewBase, *focus, config.LimitsFor(profile))
+	}
+	// 上游 05c8e90 的轻量图引导（规划前强制 context_search 查询）与本地
+	// 完整/精简态势窗口并存：bootstrap 给事件计数、相关记录和读取入口，
+	// graph_overview 给可配置的本轮态势窗口。
+	situational := cancelled + tsx.plannerBootstrap(ctx, triggers) + renderPlannerOverview(overview, profile, OverviewRenderOptions{
+		Config: config,
+		Focus:  focus,
+		Base:   overviewBase,
+	})
+	if profile == OverviewLean {
+		situational += leanOverviewGuidance
+	}
 	// 任务级 deadline / 终局模式(经 ctx 注入,见 taskclock.go)。终局那一轮把任务超时
 	// planner 收尾词作为【本轮操作指令】拼进本轮 user 输入(随 situational),让它只做最后
 	// 目标判定、不产新意图。
@@ -326,9 +468,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	// planner 无自身墙钟预算;有 deadline 时把 MaxDuration 夹逼到剩余,让在跑的规划轮在
 	// 任务到点时进收尾(因超时→任务超时词,因步数→per-run 词)。
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, 0)
-	settle := wrapupSettlement("planner", nil)
+	settle := wrapupSettlement("planner")
 	if tc.DeadlineUnix > 0 {
-		settle = wrapupSettlementForTask("planner", nil, clamped)
+		settle = wrapupSettlementForTask("planner", clamped)
 	}
 	runProxyAddr := TaskProxyAddr(p.proxyAddr, p.proxyCACert, taskID, guard.AssetSkipScope(ctx))
 	todoPreview, todoErr := p.plannerTodos(ctx, ts)
@@ -388,12 +530,21 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 		opts.Compaction.MaxOutputTokens = opts.MaxTokens
 	}
 	enableNoa(&opts, p.noaEnabledFn, p.workDir, noaSession, noaWarn(noaSession))
+	// 自定义上下文线（清理/摘要），未配置时保持内置窗口推导。
+	applyContextPolicy(&opts, p.ctxPolicyFn, p.compactionWindow())
 	lead := "本轮有变动；结合图引导中的事件与相关记录判断下一步，信息不足时再按需补全。"
 	if len(triggers) == 0 {
 		lead = "本轮没有具体节点变动信号；依据已有目标与上下文规划或等待，仅在缺少关键信息时按需读取。心跳相关记录可用于监督，未展示不代表不存在。"
+		// 回滚 05c8e90：心跳到点且已无 open/running 意图时，明确要求本轮补出方向，
+		// 避免“只复查、不派活”的空转轮（该提交之前的原始行为）。
+		if active, err := ts.HasActiveIntent(); err == nil && !active {
+			lead = "本轮是**定时巡检（心跳到点）**的唤醒，且当前**已没有任何 open 或 running 的意图**——没有 worker 在跑、也没有排队中的方向，探索已停摆。你**必须**在本轮产出一个或多个向目标推进、且与图中既有意图**互不重复**的新意图（不得产出 0 意图）；先据下面的态势判定目标是否已达成，未达成则立即补方向："
+		}
 	}
 
-	input := lead + situational + "\n\n依据已有目标、事件和上下文规划；信息足够时直接调用 add_intent，无需先查询。信息不足时再按需读取；候选均不可用或等待依赖时结束本轮，不为凑意图绕过约束。" + todoPreview + fmt.Sprintf("\n完整待办入口：context_get({\"items\":[{\"ref\":\"planner_state:%d\",\"field\":\"/todos\"}]})", taskID)
+
+	input := lead + situational + "\n\n依据已有目标、事件和上下文规划；信息足够时直接调用 add_intent，无需先查询。信息不足时再按需读取；不为凑意图绕过约束。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" + todoPreview + fmt.Sprintf("\n完整待办入口：context_get({\"items\":[{\"ref\":\"planner_state:%d\",\"field\":\"/todos\"}]})", taskID)
+
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
 	if err := ctx.Err(); err != nil {

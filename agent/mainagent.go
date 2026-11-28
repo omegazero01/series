@@ -34,13 +34,22 @@ type MainAgent struct {
 	cancelIntent    IntentStopper                          // user cancellation, shared with the UI
 	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	ctxPolicyFn     func() ContextPolicyConfig             // resolver: 自定义上下文线(清理/摘要)，nil = 内置窗口推导
 	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	// smart backs mark_host_proxy / check_host_proxy. Nil = feature off.
+	smart SmartProxyView
 }
 
 // SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
 // context-compression mechanism. nil/unset = off (built-in compaction). Read per
 // run so the settings toggle takes effect without rebuilding the agent.
 func (m *MainAgent) SetNoaEnabled(fn func() bool) { m.noaEnabledFn = fn }
+
+// SetContextPolicy wires a resolver returning the custom context lines (tool-result
+// clear line / history summary line). nil or all-zero = keep the SDK's window-derived
+// defaults, i.e. behaviour identical to before this feature. Read per run, so a
+// settings change takes effect on the next run without rebuilding the agent.
+func (m *MainAgent) SetContextPolicy(fn func() ContextPolicyConfig) { m.ctxPolicyFn = fn }
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
 // model path (true = non-streaming). nil/unset = streaming (default).
@@ -75,6 +84,10 @@ func (m *MainAgent) compactionWindow() int {
 // SetProxy points the main agent's WebFetch at the recording proxy plus the CA
 // cert it trusts to verify HTTPS through it (empty addr = direct).
 func (m *MainAgent) SetProxy(addr, caCert string) { m.proxyAddr, m.proxyCACert = addr, caCert }
+
+// SetSmartProxy installs the per-request proxy selector so mark_host_proxy /
+// check_host_proxy work in the human-interface agent.
+func (m *MainAgent) SetSmartProxy(s SmartProxyView) { m.smart = s }
 
 // SetWebSearch selects the web_search backend for the main agent (off by default).
 func (m *MainAgent) SetWebSearch(o WebSearchOpts) { m.webSearch = o }
@@ -127,6 +140,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		tsx.SetAssetStore(as, as.Companies())
 	}
 	tsx.SetTaskID(taskID)
+	tsx.SetSmartProxy(m.smart) // 智能代理：允许主 Agent 标记被拦截的主机
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
 	if len(notifyNodes) > 0 {
 		tsx.SetNotifyNodes(notifyNodes[0])
@@ -190,7 +204,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		DeepSeekSearchAPIKey:  m.webSearch.DeepSeekAPIKey,
 		DeepSeekSearchModel:   m.webSearch.DeepSeekModel,
 		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 10 轮)。
-		Settlement:   wrapupSettlement("mainagent", nil),
+		Settlement:   wrapupSettlement("mainagent"),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
@@ -215,6 +229,8 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		noaSession = fmt.Sprintf("exp%d-main-s%d", ts.ID(), mainSeg)
 	}
 	enableNoa(&opts, m.noaEnabledFn, m.workDir, noaSession, noaWarn(noaSession))
+	// 自定义上下文线（清理/摘要），未配置时保持内置窗口推导。
+	applyContextPolicy(&opts, m.ctxPolicyFn, m.compactionWindow())
 	ctx = attachSideCapture(ctx, &opts)
 	s, closeSession, err := newSession(opts)
 	if err != nil {

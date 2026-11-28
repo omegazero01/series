@@ -156,6 +156,9 @@ type triggeredRun struct {
 	taskDesc  string // 任务描述(任务级,同任务相同);合并时只渲染一次
 	taskGoal  string // 任务目标(任务级,同任务相同);合并时只渲染一次
 	mergeable bool   // true for finding/goal event triggers (merge by taskID)
+	// llmProfileID is set by the durable report-job worker. It freezes the
+	// task's profile at job creation and never mutates the task's LLM setting.
+	llmProfileID *int64
 }
 
 func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDir string) *Server {
@@ -163,6 +166,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
+	// A preview instance serves the UI/API against the same data store without
+	// starting task runtimes or background workers. It is opt-in so production
+	// behavior is unchanged.
+	preview := os.Getenv("SERIES_PREVIEW") == "1"
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
@@ -233,6 +240,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		wireTools(m.pg, domainReg, m.dir) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
 		seedPrompts(m.pg)                 // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
 		s.seedOrchestrationTools()        // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		s.disableLegacyReporterTrigger()  // 旧库关闭 report_finding 触发队列，改走持久化报告任务
 		s.wireContextReads()
 		if err := migrateContextCatalog(m.pg); err != nil {
 			log.Printf("[tools] 上下文工具迁移失败，禁止 Agent 装配: %v", err)
@@ -244,13 +252,16 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
-		go s.evidenceStore().RunGC(s.ctx)
-		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
-		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
-		// Fill the tool cache for any enabled MCP that has none yet (notably the
-		// seeded Playwright MCP on first run). Async so it never blocks startup.
-		go s.discoverEmptyMCPsOnStartup()
-		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
+		if !preview {
+			go s.evidenceStore().RunGC(s.ctx)
+			s.seedPythonInterpreter()          // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
+			go newScheduler(s).Run(s.ctx)      // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+			go s.runFindingReportWorker(s.ctx) // 报告任务旁路 worker，不参与 Worker/Planner 队列
+			// Fill the tool cache for any enabled MCP that has none yet (notably the
+			// seeded Playwright MCP on first run). Async so it never blocks startup.
+			go s.discoverEmptyMCPsOnStartup()
+			logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
+		}
 	}
 	// precedence: persisted DB config > env.
 	if cfg, ok := s.loadLLMConfig(); ok {
@@ -268,7 +279,13 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	} else {
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
-	s.restoreTaskRuntimes()
+	if preview {
+		// Populate the in-memory task registry for read-only UI inspection, but
+		// do not start task runtimes or background workers.
+		m.LoadExisting()
+	} else {
+		s.restoreTaskRuntimes()
+	}
 	if m.pg != nil {
 		go func() {
 			if err := m.pg.BuildContextSearchIndexes(s.ctx); err != nil && s.ctx.Err() == nil {
@@ -276,10 +293,12 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			}
 		}()
 	}
-	go s.workerFeedbackLoop()
-	go s.reconcileConcurrency()
-	s.startTaskArchiveWorker()
-	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
+	if !preview {
+		go s.workerFeedbackLoop()
+		go s.reconcileConcurrency()
+		s.startTaskArchiveWorker()
+		s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
+	}
 	return s
 }
 
@@ -451,10 +470,13 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetTrafficRecording(s.m.TrafficEnabled())
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
+
 	wk.SetConstraintInjectContext(s.constraintInjectWorkerContext) // 操作约束注入 worker(可配置,默认开;每轮读)
 	wk.SetNonStreaming(nonStreamingResolver(wCfg))                 // 该 profile 选非流式时走 Provider.Complete
 	wk.SetMaxTokens(maxTokensResolver(wCfg))                       // 单次回复输出上限(0 = 不发)
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)                     // 实验功能:noa 上下文压缩(每 run 读)
+	wk.SetContextPolicy(s.m.ContextPolicyConfig)                   // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
+
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, providerCompactionWindow(pProv, pCfg), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.findingRecorder())
@@ -462,10 +484,15 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetSteerWork(s.engine.SteerWork)                     // planner steer_work → inject mid-run course-correction
 	pl.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert()) // WebFetch through the task policy proxy
 	pl.SetWebSearch(s.webSearchFor("planner"))
+
 	pl.SetConstraintInjectContext(s.constraintInjectPlannerContext) // 操作约束注入 planner(可配置,默认开;每轮读)
 	pl.SetNonStreaming(nonStreamingResolver(pCfg))                  // 该 profile 选非流式时走 Provider.Complete
 	pl.SetMaxTokens(maxTokensResolver(pCfg))                        // 单次回复输出上限(0 = 不发)
 	pl.SetNoaEnabled(s.m.NoaCompactionEnabled)                      // 实验功能:noa 上下文压缩(每 run 读)
+	pl.SetContextPolicy(s.m.ContextPolicyConfig)                    // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
+	pl.SetOverviewProfile(s.plannerOverviewProfile)                 // 实验功能:Planner 态势窗口 full/lean(每轮读)
+	pl.SetOverviewConfig(s.plannerOverviewConfig)                   // 实验功能:可编辑的完整/精简数值(每轮读)
+
 	// cold-digest §7: background cold-node compaction, on the planner's provider/
 	// model (§4 uses the running agent's model). Uses Complete (non-streaming) for
 	// the one-shot body summarization.
@@ -489,9 +516,31 @@ func maxTokensResolver(cfg agent.Config) func() int {
 	return func() int { return maxTokens }
 }
 
+// plannerOverviewProfile converts the persisted experimental setting into the
+// planner's projection enum. Read per planning round.
+func (s *Server) plannerOverviewProfile() agent.OverviewProfile {
+	if s.m.PlannerOverviewMode() == "lean" {
+		return agent.OverviewLean
+	}
+	return agent.OverviewFull
+}
+
+// plannerOverviewConfig is the editable numerical companion to the profile
+// resolver. Read per planning round; env-locked benchmark runs get defaults.
+func (s *Server) plannerOverviewConfig() agent.OverviewConfig {
+	return s.m.PlannerOverviewConfig()
+}
+
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
 // the running engine as the GLOBAL active pair. Safe to call at runtime (UI configures LLM).
 func (s *Server) applyLLM(cfg agent.Config) error {
+	// Smart-proxy selector is process-wide: any agent surface that exposes
+	// mark_host_proxy must resolve it. applyLLM is the common path for every
+	// agent build, so wiring it once here covers all of them (per-surface wiring
+	// repeatedly missed a construction site).
+	if s.m.smart != nil {
+		agent.SetGlobalSmartProxy(s.m.smart)
+	}
 	var prov llm.Provider
 	// A persisted active profile must use the same cached provider as task chains
 	// and Agent bindings, otherwise each path owns a separate rate limiter.
@@ -541,7 +590,8 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent.SetCancelIntent(s.cancelIntentFromMain)
 	s.mainAgent.SetNonStreaming(nonStreamingResolver(mCfg))
 	s.mainAgent.SetMaxTokens(maxTokensResolver(mCfg))
-	s.mainAgent.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
+	s.mainAgent.SetNoaEnabled(s.m.NoaCompactionEnabled)   // 实验功能:noa 上下文压缩(每 run 读)
+	s.mainAgent.SetContextPolicy(s.m.ContextPolicyConfig) // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
@@ -550,7 +600,8 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.chatAgent.SetGuard(s.chatGuard())
 	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
 	s.chatAgent.SetMaxTokens(maxTokensResolver(cfg))
-	s.chatAgent.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
+	s.chatAgent.SetNoaEnabled(s.m.NoaCompactionEnabled)   // 实验功能:noa 上下文压缩(每 run 读)
+	s.chatAgent.SetContextPolicy(s.m.ContextPolicyConfig) // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	s.llmProv = prov
 	s.llmCfg = cfg
 	s.llmOn = true
@@ -763,7 +814,8 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	ca.SetGuard(s.chatGuard())
 	ca.SetNonStreaming(nonStreamingResolver(cfg))
 	ca.SetMaxTokens(maxTokensResolver(cfg))
-	ca.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
+	ca.SetNoaEnabled(s.m.NoaCompactionEnabled)   // 实验功能:noa 上下文压缩(每 run 读)
+	ca.SetContextPolicy(s.m.ContextPolicyConfig) // 自定义上下文线:清理线/摘要线(每 run 读,未配置=内置窗口推导)
 	s.profMu.Lock()
 	if ex := s.profChatAgents[id]; ex != nil { // lost the race → keep the winner
 		ca = ex
@@ -851,6 +903,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.attachTaskAssets)
 	mux.HandleFunc("DELETE /api/tasks/{id}/assets/{assetID}", s.detachTaskAsset)
+	mux.HandleFunc("GET /api/tasks/{id}/smart-proxy/hosts", s.getTaskSmartProxyHosts)
+	mux.HandleFunc("DELETE /api/tasks/{id}/smart-proxy/hosts", s.deleteTaskSmartProxyHost)
 	mux.HandleFunc("GET /api/tasks/{id}/intent-assets", s.taskIntentAssets)
 	mux.HandleFunc("GET /api/tasks/{id}/asset-approvals", s.listTaskAssetApprovals)
 	mux.HandleFunc("POST /api/tasks/{id}/asset-approvals/block", func(w http.ResponseWriter, r *http.Request) { s.mutateTaskAssetApprovals(w, r, "block") })
@@ -905,6 +959,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/groups", s.findingGroups)
 	mux.HandleFunc("GET /api/exploration/findings/asset-tree", s.findingAssetTree)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
+	mux.HandleFunc("GET /api/exploration/findings/report-missing", s.missingFindingReports)
+	mux.HandleFunc("POST /api/exploration/findings/reports", s.generateFindingReports)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	s.registerFindingTraffic(mux)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
@@ -959,6 +1015,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
 	mux.HandleFunc("POST /api/settings/global-proxy/test", s.testGlobalProxy)
+	mux.HandleFunc("DELETE /api/settings/smart-proxy/hosts", s.deleteSmartProxyHost)
 	mux.HandleFunc("GET /api/chat/mentions", s.searchChatMentions)
 	mux.HandleFunc("POST /api/chat", s.chat)
 	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
@@ -2294,10 +2351,11 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 // findingsExport 导出发现页的漏洞。
 //
 //	scope   = filtered（沿用页面筛选）| all（全部）| selected（勾选的 ids）
-//	format  = md-single（整合一份 .md）| md-zip（一漏洞一 .md,打包 zip）
-//	          | csv | json
+//	format  = md-report / md-single（提交版单文件）
+//	          | md-report-zip / md-zip（提交版一漏洞一文件）| csv | json
 //	ids     = 逗号分隔的 finding id（scope=selected 时必填）
 //	筛选参数 severity/status/vulnclass/task_id/q/sort 与列表接口一致（scope=filtered 用）。
+//	所有导出格式都只输出 findings.report（人类提交版），不带汇总/证据/技术明细。
 func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	scope := q.Get("scope")
@@ -2344,10 +2402,6 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.RemoveAll(stage)
-	if err = s.evidenceStore().StageFindingsExport(r.Context(), fs, stage, format == "md-zip"); err != nil {
-		evidenceError(w, err)
-		return
-	}
 	now := time.Now()
 	stamp := now.Format("20060102-150405")
 	setDownload := func(contentType, filename string) {
@@ -2356,12 +2410,12 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch format {
-	case "md-single":
-		setDownload("text/markdown; charset=utf-8", "findings-"+stamp+".md")
-		_, _ = w.Write([]byte(report.FindingsMarkdown(fs, now)))
-	case "md-zip":
-		path := filepath.Join(stage, "findings.zip")
-		if err := buildFindingsEvidenceZip(path, fs, stage, now); err != nil {
+	case "md-report", "md-single":
+		setDownload("text/markdown; charset=utf-8", "findings-report-"+stamp+".md")
+		_, _ = w.Write([]byte(report.FindingsReportMarkdown(fs)))
+	case "md-report-zip", "md-zip":
+		path := filepath.Join(stage, "findings-report.zip")
+		if err := buildFindingsReportZip(path, fs); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
@@ -2371,8 +2425,8 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer file.Close()
-		setDownload("application/zip", "findings-"+stamp+".zip")
-		http.ServeContent(w, r, "findings.zip", now, file)
+		setDownload("application/zip", "findings-report-"+stamp+".zip")
+		http.ServeContent(w, r, "findings-report.zip", now, file)
 	case "csv":
 		setDownload("text/csv; charset=utf-8", "findings-"+stamp+".csv")
 		_, _ = w.Write(report.FindingsCSV(fs))
@@ -2384,7 +2438,10 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 				f.TrafficBindings[i].Snapshot.ReqHead = ""
 				f.TrafficBindings[i].Snapshot.RespHead = ""
 			}
-			out = append(out, findingFromDB(f, assets))
+			dto := findingFromDB(f, assets)
+			// JSON 也只导出人类提交版：技术明细只供 context_search 使用。
+			dto.ReportDetail = ""
+			out = append(out, dto)
 		}
 		setDownload("application/json; charset=utf-8", "findings-"+stamp+".json")
 		enc := json.NewEncoder(w)
@@ -3516,8 +3573,11 @@ func (s *Server) settingsPayload() map[string]any {
 		"web_search_backend":       backend,
 		"brave_key_set":            strings.TrimSpace(braveKey) != "",
 		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":         proxy,             // 独立出口代理(http/https/socks5)，空=直连
-		"global_proxy":             s.m.GlobalProxy(), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"web_search_proxy":         proxy,                                      // 独立出口代理(http/https/socks5)，空=直连
+		"global_proxy":             s.m.GlobalProxy(),                          // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"smart_proxy":              s.m.SmartProxyEnabled(),                    // 智能代理：按请求决定是否走代理池(默认关)
+		"smart_proxy_pool":         s.m.SmartProxyPool(),                       // 智能代理使用的代理池地址(空=已标记主机仍直连)
+		"smart_proxy_hosts":        smartProxyHostViews(s.m.SmartProxyHosts()), // 已被标记走代理的主机名单
 		"shell_detected":           shellDetectedPayload(),
 		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
@@ -3533,6 +3593,13 @@ func (s *Server) settingsPayload() map[string]any {
 		// 实验功能:noa 模型驱动上下文压缩(默认关)。开启后平台接入的四类 agent 由 noa
 		// 接管上下文压缩,取代内置 compaction;每 run 读一次,对之后启动的 run 生效。
 		"noa_compaction": s.m.NoaCompactionEnabled(),
+		// 实验功能:Planner 态势窗口 full/lean(默认 full)。仅影响 Planner 每轮预注入
+		// 的 graph_overview 投影;图/权限/审计/UI 不变。
+		"planner_overview_mode":   s.m.PlannerOverviewMode(),
+		"planner_overview_config": s.m.PlannerOverviewConfig(),
+		// 上下文压缩的两条线（清理线=无损、摘要线=有损）。零值=用内置窗口推导；
+		// 每 run 读一次，保存后对之后启动的 run 生效。
+		"context_policy_config": s.m.ContextPolicyConfig(),
 	}
 }
 
@@ -3576,6 +3643,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		TavilyKey        *string         `json:"tavily_search_api_key"`
 		WebSearchProxy   *string         `json:"web_search_proxy"` // 独立出口代理(http/https/socks5)；null=不改，""=清空
 		GlobalProxy      *string         `json:"global_proxy"`     // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		SmartProxy       *bool           `json:"smart_proxy"`      // 智能代理开关；null=不改。逐请求决策，即时生效
+		SmartProxyPool   *string         `json:"smart_proxy_pool"` // 智能代理的代理池地址；null=不改，""=清空
 		ShellMode        json.RawMessage `json:"shell_mode"`
 		PythonInterp     *string         `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers          *int            `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
@@ -3591,6 +3660,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		ConstraintsInjectWorker  *bool `json:"constraints_inject_worker"`
 		// 实验功能:noa 上下文压缩开关(默认关);每 run 读,对之后启动的 run 生效,无需重建 agent。
 		NoaCompaction *bool `json:"noa_compaction"`
+		// 实验功能:Planner 态势窗口 full/lean(默认 full);每轮读,无需重建 agent。
+		PlannerOverviewMode *string `json:"planner_overview_mode"`
+		// Planner 态势窗口的完整/精简数值；每轮读，无需重建 agent。
+		PlannerOverviewConfig *agent.OverviewConfig `json:"planner_overview_config"`
+		// 上下文压缩的两条线（清理线=无损可回读、摘要线=有损）。零值字段=用内置
+		// 窗口推导；每 run 读一次，保存后对之后启动的 run 生效，无需重建 LLM 链。
+		ContextPolicyConfig *agent.ContextPolicyConfig `json:"context_policy_config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3697,6 +3773,27 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.PlannerOverviewMode != nil {
+		// Planner 每轮读取该设置,切换在下一轮规划生效,无需 applyLLM 重建。
+		if err := s.m.SetPlannerOverviewMode(*req.PlannerOverviewMode); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	if req.PlannerOverviewConfig != nil {
+		// 每轮读取；保存后下一轮生效，无需 applyLLM 重建。
+		if err := s.m.SetPlannerOverviewConfig(*req.PlannerOverviewConfig); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	if req.ContextPolicyConfig != nil {
+		// 每 run 读取；保存后对之后启动的 run 生效，无需 applyLLM 重建。
+		if err := s.m.SetContextPolicyConfig(*req.ContextPolicyConfig); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
 	if req.Workers != nil {
 		if err := s.m.SetWorkers(*req.Workers); err != nil {
 			writeErr(w, 400, err.Error())
@@ -3783,7 +3880,19 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = true // capture-off egress is baked into agents at build time → rebuild
 	}
-
+	if req.SmartProxy != nil {
+		// 逐请求决策，切换即时生效，无需重建 agent。
+		if err := s.m.SetSmartProxy(*req.SmartProxy); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	if req.SmartProxyPool != nil {
+		if err := s.m.SetSmartProxyPool(*req.SmartProxyPool); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
 	if req.WebSearchEnabled != nil || req.WebSearchBackend != nil || req.BraveKey != nil || req.TavilyKey != nil || req.WebSearchProxy != nil {
 		// Fill unspecified fields from current state so a partial PUT doesn't reset them.
 		on, backend, _, _, _ := s.m.WebSearch()

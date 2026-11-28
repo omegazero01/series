@@ -87,6 +87,7 @@ import type {
   SessionTokenUsage,
   Settings,
   HTTPAuthSettings,
+  SmartProxyHost,
   Severity,
   SkillCall,
   SkillItem,
@@ -554,10 +555,25 @@ export const api = {
   findingAssetTree: (q: Omit<FindingQuery, "page" | "pageSize">) =>
     get<FindingAssetTree>(`/exploration/findings/asset-tree?${findingFilterParams(q).toString()}`),
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
+  // 未出具提交版报告的漏洞（补出报告弹窗）。
+  missingFindingReports: (q: { page: number; pageSize: number } & Omit<FindingQuery, "page" | "pageSize">) => {
+    const p = findingFilterParams(q);
+    p.set("missing_report", "1");
+    p.set("summary_only", "1");
+    p.set("page", String(q.page));
+    p.set("limit", String(q.pageSize));
+    return get<FindingsPage>(`/exploration/findings/report-missing?${p.toString()}`);
+  },
+  // 为选中漏洞逐个排入 reporter 运行；不会新建 finding。
+  generateFindingReports: (findingIDs: string[]) =>
+    post<{ queued: number; skipped: { finding_id: string; reason: string }[] }>(
+      "/exploration/findings/reports",
+      { finding_ids: findingIDs },
+    ),
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
   // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
   exportFindings: async (opts: {
-    format: "md-single" | "md-zip" | "csv" | "json";
+    format: "md-report" | "md-report-zip" | "md-single" | "md-zip" | "csv" | "json";
     scope: "filtered" | "all" | "selected";
     filters?: Omit<FindingQuery, "page" | "pageSize">;
     ids?: string[];
@@ -869,6 +885,20 @@ export const api = {
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),
   setSettings: (patch: Partial<Settings>) => put<Settings>(`/settings`, patch),
+  // 任务级：列出该任务标记的主机。
+  taskSmartProxyHosts: (taskId: string) =>
+    get<{ hosts: SmartProxyHost[] }>(`/tasks/${taskId}/smart-proxy/hosts`).then((r) => arr(r.hosts)),
+  // 任务级：移除该任务下的一条标记。
+  deleteTaskSmartProxyHost: (taskId: string, host: string) =>
+    http<{ ok: boolean }>(`/tasks/${taskId}/smart-proxy/hosts?host=${encodeURIComponent(host)}`, {
+      method: "DELETE",
+    }),
+  // 删除一条智能代理标记（按任务 + 主机定位）。
+  deleteSmartProxyHost: (taskId: number, host: string) =>
+    http<{ ok: boolean }>(
+      `/settings/smart-proxy/hosts?task_id=${taskId}&host=${encodeURIComponent(host)}`,
+      { method: "DELETE" },
+    ),
   // Run a real "test" search with the given (or saved) config to verify it works.
   testWebSearch: (patch: {
     web_search_backend?: string;
