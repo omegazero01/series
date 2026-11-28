@@ -1,1 +1,0 @@
-ok  	github.com/neouks/series/db	66.341s

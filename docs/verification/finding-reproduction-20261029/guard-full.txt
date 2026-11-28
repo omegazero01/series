@@ -1,1 +1,0 @@
-ok  	github.com/neouks/series/guard	0.573s
