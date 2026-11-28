@@ -6,10 +6,11 @@ import { DownloadIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { FindingWorkspaceDetail } from "@/components/finding-detail-content";
-import { FindingSuppressionRules } from "@/components/finding-suppression-rules";
 import { FindingPagination } from "@/components/finding-pagination";
 import { FindingLayoutToggle, FindingPresentation, useFindingPresentation } from "@/components/finding-presentation";
+import { FindingReportBackfill } from "@/components/finding-report-backfill";
 import { FindingSelector } from "@/components/finding-selector";
+import { FindingSuppressionRules } from "@/components/finding-suppression-rules";
 import { FindingsToolbar } from "@/components/findings-toolbar";
 import { useNotificationRead } from "@/components/task-notifications";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -102,7 +103,7 @@ function TaskFindings({ taskId }: { taskId: string }) {
     if (exporting || !selectedIds.size) return;
     setExporting(true);
     try {
-      await api.exportFindings({ format: "md-single", scope: "selected", ids: [...selectedIds] });
+      await api.exportFindings({ format: "md-report-zip", scope: "selected", ids: [...selectedIds] });
       toast.success("已开始下载导出文件");
     } catch (e) {
       toast.error(`导出失败：${(e as Error).message}`);
@@ -151,6 +152,7 @@ function TaskFindings({ taskId }: { taskId: string }) {
         }
         actions={
           <>
+            <FindingReportBackfill taskId={taskId} />
             <FindingSuppressionRules taskId={taskId} readOnly={filters.scope === "inherited"} />
             <Button
               variant="ghost"
@@ -168,6 +170,8 @@ function TaskFindings({ taskId }: { taskId: string }) {
       />
       <FindingPresentation
         {...presentation}
+        onToggleList={presentation.toggleList}
+        onToggleDetail={presentation.toggleDetail}
         onOpenChange={presentation.setDetailOpen}
         detail={
           selected ? (

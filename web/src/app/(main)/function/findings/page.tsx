@@ -9,6 +9,7 @@ import { toast } from "sonner";
 
 import { FindingWorkspaceDetail } from "@/components/finding-detail-content";
 import { FindingPagination } from "@/components/finding-pagination";
+import { FindingReportBackfill } from "@/components/finding-report-backfill";
 import { FindingLayoutToggle, FindingPresentation, useFindingPresentation } from "@/components/finding-presentation";
 import { FindingSelector } from "@/components/finding-selector";
 import { FindingFilterSelect, FindingsToolbar } from "@/components/findings-toolbar";
@@ -203,7 +204,9 @@ export default function FindingsPage() {
   // 导出弹窗状态:范围(当前筛选/全部/选中) × 格式(md 单文件/md 分文件 zip/csv/json)。
   const [exportOpen, setExportOpen] = React.useState(false);
   const [exportScope, setExportScope] = React.useState<"filtered" | "all" | "selected">("filtered");
-  const [exportFormat, setExportFormat] = React.useState<"md-single" | "md-zip" | "csv" | "json">("md-single");
+  const [exportFormat, setExportFormat] = React.useState<
+    "md-report" | "md-report-zip" | "md-single" | "md-zip" | "csv" | "json"
+  >("md-report-zip");
   const [exporting, setExporting] = React.useState(false);
 
   const toggleSelected = React.useCallback((id: string, checked: boolean) => {
@@ -779,6 +782,7 @@ export default function FindingsPage() {
         }
         actions={
           <>
+            <FindingReportBackfill />
             <Button size="icon" variant="ghost" onClick={openExport} aria-label="导出发现" title="导出发现">
               <DownloadIcon />
             </Button>
@@ -791,6 +795,8 @@ export default function FindingsPage() {
       <div className="flex min-w-0 flex-1 flex-col gap-4">
         <FindingPresentation
           {...presentation}
+          onToggleList={presentation.toggleList}
+          onToggleDetail={presentation.toggleDetail}
           onOpenChange={presentation.setDetailOpen}
           detail={
             <>
@@ -1094,11 +1100,12 @@ export default function FindingsPage() {
             <div className="flex flex-col gap-2">
               <span className="text-muted-foreground text-xs">导出格式</span>
               <RadioGroup value={exportFormat} onValueChange={(v) => setExportFormat(v as typeof exportFormat)}>
-                <label htmlFor="export-format-md-single" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-format-md-single" value="md-single" /> Markdown 汇总报告（单个 .md 文件）
+                <label htmlFor="export-format-md-report" className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem id="export-format-md-report" value="md-report" /> 提交报告（单个 .md 文件）
                 </label>
-                <label htmlFor="export-format-md-zip" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-format-md-zip" value="md-zip" /> Markdown 分文件（一漏洞一 .md,打包 .zip）
+                <label htmlFor="export-format-md-report-zip" className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem id="export-format-md-report-zip" value="md-report-zip" /> 提交报告（一漏洞一 .md，打包
+                  .zip）
                 </label>
                 <label htmlFor="export-format-csv" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-format-csv" value="csv" /> CSV 表格（.csv）
