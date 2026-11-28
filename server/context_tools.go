@@ -292,12 +292,6 @@ func migrateContextCatalog(pg *db.DB) error {
 	if err := pg.MigrateFindingReproductionPrompts(agent.ReporterDefaultPrompt); err != nil {
 		return err
 	}
-	if err := pg.MigrateConciseFindingReportPrompt(agent.ReporterDefaultPrompt); err != nil {
-		return err
-	}
-	if err := pg.MigrateInlineHTTPReportPrompt(agent.ReporterDefaultPrompt); err != nil {
-		return err
-	}
 	if err := pg.MigrateContextPrompts(defaults, agent.PreviousContextPromptHashes); err != nil {
 		return err
 	}
@@ -309,6 +303,11 @@ func migrateContextCatalog(pg *db.DB) error {
 	}
 	if err := pg.MigratePlannerProactivePrompt(defaults["planner"], agent.PreviousPlannerProactivePromptHashes); err != nil {
 		return err
+	}
+	if report, ok, err := pg.GetSetting("planner_proactive_prompt_report_v1"); err != nil {
+		return err
+	} else if ok && report != "{}" {
+		log.Printf("[tools] Planner 主动检索提示词升级记录（自定义原文保留）: %s", report)
 	}
 	if err := pg.MigratePlannerDirectDispatchPrompt(defaults["planner"], agent.PreviousPlannerDirectDispatchPromptHashes); err != nil {
 		return err

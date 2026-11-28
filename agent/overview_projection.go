@@ -7,7 +7,20 @@ import (
 	"unicode/utf8"
 )
 
-const plannerOverviewRunes = 24000
+const (
+	plannerOverviewRunes     = 24000
+	plannerLeanOverviewRunes = 10000
+)
+
+// OverviewProfile selects how much of the exploration graph the planner sees
+// in its per-round pre-injected situation block. The graph itself is unchanged;
+// this only controls the agent-facing projection.
+type OverviewProfile string
+
+const (
+	OverviewFull OverviewProfile = "full"
+	OverviewLean OverviewProfile = "lean"
+)
 
 // Projection never slices serialized records. Each section gets a directory
 // entry before any section gets body space; round-robin admission prevents a

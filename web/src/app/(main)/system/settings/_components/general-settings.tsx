@@ -1,12 +1,12 @@
 "use client";
 
-import { useSettingsDirty, useSettingsDraft } from "@/components/settings/settings-context";
-
 import * as React from "react";
+
 import { HTTPAuthCard } from "./http-auth-card";
 import { ModelResourcesCard } from "./model-resources-card";
 import { ModelDeadlinesCard } from "./model-deadlines-card";
 import { ModelBytesCard } from "./model-bytes-card";
+
 
 import {
   CheckCircle2Icon,
@@ -14,6 +14,7 @@ import {
   FlaskConicalIcon,
   GlobeIcon,
   KeyboardIcon,
+  LayersIcon,
   Loader2Icon,
   RadioTowerIcon,
   SearchIcon,
@@ -22,6 +23,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useSettingsDirty, useSettingsDraft } from "@/components/settings/settings-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -31,8 +33,178 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
-import type { GlobalProxyProbeResult, Settings } from "@/lib/types";
+import type { ContextPolicyConfig, GlobalProxyProbeResult, PlannerOverviewConfig, PlannerOverviewLimits, Settings } from "@/lib/types";
 
+const DEFAULT_PLANNER_OVERVIEW_CONFIG: PlannerOverviewConfig = {
+  full: {
+    budget_runes: 24000,
+    goals: 100,
+    recent_facts: 20,
+    findings: 10,
+    recent_done_intents: 12,
+    hints: 50,
+    cold_digests: 15,
+  },
+  lean: {
+    budget_runes: 10000,
+    goals: 20,
+    recent_facts: 8,
+    findings: 3,
+    recent_done_intents: 5,
+    hints: 10,
+    cold_digests: 3,
+  },
+};
+
+// 上下文压缩表单字段。全部允许 0/留空 = 沿用底座默认，服务端会做范围校验。
+const CONTEXT_POLICY_FIELDS: Array<{
+  key: keyof ContextPolicyConfig;
+  label: string;
+  description: string;
+  min: number;
+  max: number;
+  step: number;
+}> = [
+  {
+    key: "clear_after_tokens",
+    label: "工具输出清理线（token）",
+    description: "超过这条线后，开始把旧的命令/网页/文件输出正文换成占位符（无损，可重新读取）。",
+    min: 20000,
+    max: 600000,
+    step: 10000,
+  },
+  {
+    key: "keep_recent_tool_results",
+    label: "保留最近工具结果（条）",
+    description: "清理时始终保留原文的最近工具结果条数；底座默认 5。",
+    min: 1,
+    max: 50,
+    step: 1,
+  },
+  {
+    key: "summary_after_tokens",
+    label: "历史摘要线（token）",
+    description: "超过这条线后，把更早的历史摘要成一段文字（有损、不可逆）。必须大于清理线。",
+    min: 40000,
+    max: 900000,
+    step: 10000,
+  },
+  {
+    key: "keep_recent_messages",
+    label: "保留最近消息（条）",
+    description: "摘要时始终保留、不参与摘要的最近消息条数；底座默认 8。",
+    min: 2,
+    max: 50,
+    step: 1,
+  },
+];
+
+// 预设按"实测会话峰值"给三档：会话峰值中位 7.6 万、p90 14.3 万（近 669 个 worker 会话）。
+const CONTEXT_POLICY_PRESETS: Array<{ label: string; hint: string; value: ContextPolicyConfig }> = [
+  {
+    label: "精简（省钱）",
+    hint: "清理 6 万 / 摘要 18 万：约 30% 的长会话会被摘要一次",
+    value: { clear_after_tokens: 60000, keep_recent_tool_results: 4, summary_after_tokens: 180000, keep_recent_messages: 8 },
+  },
+  {
+    label: "标准（推荐）",
+    hint: "清理 12 万 / 摘要 30 万：约 6% 的长会话会被摘要",
+    value: { clear_after_tokens: 120000, keep_recent_tool_results: 5, summary_after_tokens: 300000, keep_recent_messages: 8 },
+  },
+  {
+    label: "宽松",
+    hint: "清理 24 万 / 摘要 60 万：只有极少数超长会话会被摘要",
+    value: { clear_after_tokens: 240000, keep_recent_tool_results: 8, summary_after_tokens: 600000, keep_recent_messages: 8 },
+  },
+];
+
+type PlannerLimitKey = keyof PlannerOverviewLimits;
+
+const PLANNER_LIMIT_FIELDS: Array<{
+  key: PlannerLimitKey;
+  label: string;
+  description: string;
+  min: number;
+  max: number;
+  step: number;
+}> = [
+  {
+    key: "budget_runes",
+    label: "总字符预算",
+    description: "所有分区合计的硬上限，不是单个分区的预算。",
+    min: 2000,
+    max: 48000,
+    step: 500,
+  },
+  {
+    key: "goals",
+    label: "目标条数",
+    description: "目标条件最多显示几条。",
+    min: 1,
+    max: 100,
+    step: 1,
+  },
+  {
+    key: "recent_facts",
+    label: "事实展示条数",
+    description: "最终展示的事实条数；精简模式会从最近事实和当前方向/触发相关事实中选，不只是最近。",
+    min: 1,
+    max: 20,
+    step: 1,
+  },
+  {
+    key: "findings",
+    label: "漏洞记录（发现）条数",
+    description: "对应 finding_list（漏洞/发现记录），不是 fact（事实）；包含已确认或已驳回的漏洞记录。",
+    min: 1,
+    max: 10,
+    step: 1,
+  },
+  {
+    key: "recent_done_intents",
+    label: "最近完成意图条数",
+    description: "最近结束的意图，按时间倒序保留。",
+    min: 1,
+    max: 12,
+    step: 1,
+  },
+  {
+    key: "hints",
+    label: "活跃提示条数",
+    description: "只统计 active 提示；已消费提示不会进入窗口。",
+    min: 1,
+    max: 50,
+    step: 1,
+  },
+  {
+    key: "cold_digests",
+    label: "冷摘要条数",
+    description: "旧任务的冷摘要条数。",
+    min: 1,
+    max: 15,
+    step: 1,
+  },
+];
+
+function mergePlannerLimits(base: PlannerOverviewLimits, value?: Partial<PlannerOverviewLimits>): PlannerOverviewLimits {
+  const pick = (n: number | undefined, fallback: number) => (typeof n === "number" && n > 0 ? n : fallback);
+  return {
+    budget_runes: pick(value?.budget_runes, base.budget_runes),
+    goals: pick(value?.goals, base.goals),
+    recent_facts: pick(value?.recent_facts, base.recent_facts),
+    findings: pick(value?.findings, base.findings),
+    recent_done_intents: pick(value?.recent_done_intents, base.recent_done_intents),
+    hints: pick(value?.hints, base.hints),
+    cold_digests: pick(value?.cold_digests, base.cold_digests),
+  };
+}
+
+function normalizePlannerOverviewConfig(value?: PlannerOverviewConfig): PlannerOverviewConfig {
+  return {
+    full: mergePlannerLimits(DEFAULT_PLANNER_OVERVIEW_CONFIG.full, value?.full),
+    lean: mergePlannerLimits(DEFAULT_PLANNER_OVERVIEW_CONFIG.lean, value?.lean),
+  };
+}
 
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
@@ -55,6 +227,10 @@ export default function SystemSettingsPage() {
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [testingGlobalProxy, setTestingGlobalProxy] = React.useState(false);
   const [globalProxyProbe, setGlobalProxyProbe] = React.useState<GlobalProxyProbeResult | null>(null);
+  // 智能代理：按请求决定是否走代理池（默认关，任务级名单）。
+  const [smartProxy, setSmartProxy] = React.useState(false);
+  const [smartProxyPool, setSmartProxyPool] = React.useState("");
+  const [savingSmartProxy, setSavingSmartProxy] = React.useState(false);
   const [shellDetected, setShellDetected] = React.useState<Settings["shell_detected"]>(undefined);
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
@@ -74,12 +250,20 @@ export default function SystemSettingsPage() {
   const [injectWorker, setInjectWorker] = React.useState(true);
   // 实验功能:noa 上下文压缩(默认关)。
   const [noaCompaction, setNoaCompaction] = React.useState(false);
+  // 实验功能:Planner 态势窗口(默认 full)。
+  const [plannerOverviewMode, setPlannerOverviewMode] = React.useState<"full" | "lean">("full");
+  const [plannerOverviewConfig, setPlannerOverviewConfig] = React.useState<PlannerOverviewConfig>(DEFAULT_PLANNER_OVERVIEW_CONFIG);
+  const [showPlannerAdvanced, setShowPlannerAdvanced] = React.useState(false);
+  const [savingPlannerConfig, setSavingPlannerConfig] = React.useState(false);
+  // 上下文压缩两条线（清理线/摘要线）与保留条数；空对象 = 全部沿用底座默认。
+  const [contextPolicy, setContextPolicy] = React.useState<ContextPolicyConfig>({});
+  const [savingContextPolicy, setSavingContextPolicy] = React.useState(false);
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
 
   const [draftVersion, resetDraft] = React.useReducer((n: number) => n + 1, 0);
   useSettingsDraft(
-    { skipTypesInput, retentionDays, proxyInput, globalProxyInput, pyInterp, workers },
+    { skipTypesInput, retentionDays, proxyInput, globalProxyInput, smartProxyPool, pyInterp, workers },
     draftVersion,
     loaded,
   );
@@ -97,12 +281,17 @@ export default function SystemSettingsPage() {
     setTavilyKeySet(!!s.tavily_key_set);
     setProxyInput(s.web_search_proxy ?? "");
     setGlobalProxyInput(s.global_proxy ?? "");
+    setSmartProxy(!!s.smart_proxy);
+    setSmartProxyPool(s.smart_proxy_pool ?? "");
     setShellDetected(s.shell_detected);
     setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
+    setPlannerOverviewMode(s.planner_overview_mode === "lean" ? "lean" : "full");
+    setPlannerOverviewConfig(normalizePlannerOverviewConfig(s.planner_overview_config));
+    setContextPolicy(s.context_policy_config ?? {});
   }, []);
 
   const saveWorkers = () => {
@@ -252,6 +441,87 @@ export default function SystemSettingsPage() {
       });
   };
 
+  const savePlannerOverviewMode = (v: "full" | "lean") => {
+    const prev = plannerOverviewMode;
+    setPlannerOverviewMode(v); // optimistic
+    api
+      .setSettings({ planner_overview_mode: v })
+      .then((s) => {
+        apply(s);
+        toast.success(v === "lean" ? "已开启精简态势窗口（下一轮 Planner 生效）" : "已恢复完整态势窗口");
+      })
+      .catch((e) => {
+        setPlannerOverviewMode(prev); // revert on failure
+        toast.error(`保存失败：${(e as Error).message}`);
+      });
+  };
+
+  const plannerLimits = plannerOverviewConfig[plannerOverviewMode];
+
+  const updatePlannerLimit = (key: PlannerLimitKey, value: number) => {
+    setPlannerOverviewConfig((prev) => ({
+      ...prev,
+      [plannerOverviewMode]: {
+        ...prev[plannerOverviewMode],
+        [key]: value,
+      },
+    }));
+  };
+
+  const resetPlannerLimits = () => {
+    setPlannerOverviewConfig((prev) => ({
+      ...prev,
+      [plannerOverviewMode]: { ...DEFAULT_PLANNER_OVERVIEW_CONFIG[plannerOverviewMode] },
+    }));
+    toast.info("已填入当前模式的默认值；点“保存数值”后生效");
+  };
+
+  const resetAllPlannerLimits = () => {
+    setPlannerOverviewConfig({
+      full: { ...DEFAULT_PLANNER_OVERVIEW_CONFIG.full },
+      lean: { ...DEFAULT_PLANNER_OVERVIEW_CONFIG.lean },
+    });
+    toast.info("已填入完整/精简的全部默认值；点“保存数值”后生效");
+  };
+
+  const savePlannerOverviewConfig = () => {
+    setSavingPlannerConfig(true);
+    api
+      .setSettings({ planner_overview_config: plannerOverviewConfig })
+      .then((s) => {
+        apply(s);
+        toast.success("已保存 Planner 态势窗口数值（下一轮规划生效）");
+      })
+      .catch((e) => toast.error(`保存失败：${(e as Error).message}`))
+      .finally(() => setSavingPlannerConfig(false));
+  };
+
+  const updateContextPolicy = (key: keyof ContextPolicyConfig, value: number) => {
+    setContextPolicy((prev) => ({ ...prev, [key]: Number.isFinite(value) ? value : 0 }));
+  };
+
+  const applyContextPolicyPreset = (value: ContextPolicyConfig) => {
+    setContextPolicy({ ...value });
+    toast.info("已填入预设数值；点“保存”后对之后启动的 run 生效");
+  };
+
+  const resetContextPolicy = () => {
+    setContextPolicy({});
+    toast.info("已清空自定义（= 底座默认）；点“保存”后生效");
+  };
+
+  const saveContextPolicy = () => {
+    setSavingContextPolicy(true);
+    api
+      .setSettings({ context_policy_config: contextPolicy })
+      .then((s) => {
+        apply(s);
+        toast.success("已保存上下文压缩配置（对之后启动的 run 生效）");
+      })
+      .catch((e) => toast.error(`保存失败：${(e as Error).message}`))
+      .finally(() => setSavingContextPolicy(false));
+  };
+
   // Persist a web-search patch (enable and/or backend). Optimistic with refetch.
   const saveWebSearch = (patch: Partial<Settings>) => {
     setSaving(true);
@@ -319,6 +589,18 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSavingGlobalProxy(false));
+  };
+
+  const saveSmartProxy = (patch: Partial<Settings>) => {
+    setSavingSmartProxy(true);
+    api
+      .setSettings(patch)
+      .then((s) => {
+        apply(s);
+        toast.success("已保存智能代理设置");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message))
+      .finally(() => setSavingSmartProxy(false));
   };
 
   const testGlobalProxy = () => {
@@ -641,6 +923,72 @@ export default function SystemSettingsPage() {
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
+              <RadioTowerIcon className="size-4" />
+              智能代理
+            </CardTitle>
+            <CardDescription>
+              开启后，默认<b>直连</b>，只有当 Agent 判断某主机被 WAF / 风控拦截时，才把该主机标记为经
+              <b>代理池</b>访问。与全局代理的区别：全局代理是<b>所有目标流量一律走代理</b>，智能代理是
+              <b>按需切换</b>，更贴近真实渗透场景。
+              <br />
+              标记由 Agent 自主判断（WAF 特征 / 429 / 连接重置 / JS 挑战页），不使用关键词匹配；标记仅对
+              <b>当前任务</b>生效，新建任务不会继承。
+              <br />
+              流量全程经过本地记录代理，因此捕获、审计与漏洞证据链不受影响。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <Switch
+                id="smart-proxy-enabled"
+                checked={smartProxy}
+                disabled={!loaded || savingSmartProxy}
+                onCheckedChange={(v) => {
+                  setSmartProxy(v);
+                  saveSmartProxy({ smart_proxy: v });
+                }}
+              />
+              <Label htmlFor="smart-proxy-enabled" className="text-sm font-normal">
+                启用智能代理（默认关）
+              </Label>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="smart-proxy-pool" className="text-sm font-normal text-muted-foreground">
+                代理池地址
+              </Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="smart-proxy-pool"
+                  autoComplete="off"
+                  className="flex-1"
+                  placeholder="http://user:pass@pool-host:port（被标记主机的出口）"
+                  value={smartProxyPool}
+                  disabled={!loaded || savingSmartProxy}
+                  onChange={(e) => setSmartProxyPool(e.target.value)}
+                />
+                <Button
+                  type="button"
+                  disabled={!loaded || savingSmartProxy}
+                  onClick={() => saveSmartProxy({ smart_proxy_pool: smartProxyPool.trim() })}
+                >
+                  保存
+                </Button>
+              </div>
+              <p className="text-muted-foreground text-xs">
+                {smartProxyPool.trim()
+                  ? "已配置 · 被标记的主机经此代理出网"
+                  : "未配置 · 被标记的主机仍直连（开关不会生效）"}
+              </p>
+            </div>
+            <p className="text-muted-foreground text-xs">
+              标记按<b>任务</b>管理：在对应任务的详情页「智能代理」页签中查看与移除。新任务不继承已有标记。
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
               <ShieldAlertIcon className="size-4" />
               操作约束注入
             </CardTitle>
@@ -703,6 +1051,180 @@ export default function SystemSettingsPage() {
               disabled={!loaded}
               onCheckedChange={toggleNoaCompaction}
             />
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FlaskConicalIcon className="size-4" />
+              Planner 态势窗口
+            </CardTitle>
+            <CardDescription>
+              控制 Planner 每轮预注入的探索图摘要，默认<b>完整</b>。<b>精简</b>
+              只注入目标、当前待办/运行方向、最近事实和读取入口，细节由 Planner 按需检索。两种模式的条数和字符预算可在
+              <b>高级参数</b>中调整；探索图、权限、审计和 UI 回放不受影响。切换/保存数值在下一轮规划生效，无需重建 Agent。
+              <span className="mt-2 block">
+                精简模式会给事实打一个可解释的分数：本轮触发直接产出的事实 <b>100</b> 分，
+                来自本轮触发意图的一跳关系 <b>80</b> 分，当前未完成/执行中方向直接产出 <b>40</b> 分，
+                当前方向的一跳关系 <b>15</b> 分，其他事实基础分 <b>0</b> 分。
+                再叠加新旧程度 <b>0–5</b>、实际观察到的证据 <b>+3</b>、来源意图重要度 <b>0–5</b>。
+                同分时实际观察到的优先；同一个意图最多保留 2 条。完整模式不做这层选择，仍按输入顺序截断。
+              </span>
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <Label htmlFor="planner-overview-mode" className="text-sm font-normal text-muted-foreground">
+                当前：{plannerOverviewMode === "lean" ? "精简（可调）" : "完整（可调）"}
+              </Label>
+              <div className="flex items-center gap-2">
+                <Select
+                  value={plannerOverviewMode}
+                  onValueChange={(v) => savePlannerOverviewMode(v as "full" | "lean")}
+                  disabled={!loaded}
+                >
+                  <SelectTrigger id="planner-overview-mode" className="w-48">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="full">完整（默认）</SelectItem>
+                    <SelectItem value="lean">精简（实验）</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowPlannerAdvanced((v) => !v)}
+                  disabled={!loaded}
+                >
+                  {showPlannerAdvanced ? "收起参数" : "高级参数"}
+                </Button>
+              </div>
+            </div>
+
+            {showPlannerAdvanced ? (
+              <div className="space-y-4 rounded-lg border p-4">
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  正在编辑<b>{plannerOverviewMode === "lean" ? "精简" : "完整"}</b>模式的数值。总字符预算是硬上限，
+                  各分区条数是上限值；实际进入窗口的条数还会受预算和分区轮询限制。修改保存后从下一轮规划开始生效。
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {PLANNER_LIMIT_FIELDS.map((field) => (
+                    <div key={field.key} className="space-y-1.5">
+                      <Label htmlFor={`planner-${field.key}`} className="text-xs font-normal text-muted-foreground">
+                        {field.label}
+                      </Label>
+                      <Input
+                        id={`planner-${field.key}`}
+                        type="number"
+                        min={field.min}
+                        max={field.max}
+                        step={field.step}
+                        value={plannerLimits[field.key]}
+                        disabled={!loaded || savingPlannerConfig}
+                        onChange={(e) => updatePlannerLimit(field.key, Number(e.target.value))}
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        {field.description}
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">
+                        范围 {field.min}–{field.max}；默认 {DEFAULT_PLANNER_OVERVIEW_CONFIG[plannerOverviewMode][field.key]}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button type="button" size="sm" onClick={savePlannerOverviewConfig} disabled={!loaded || savingPlannerConfig}>
+                    {savingPlannerConfig ? <Loader2Icon className="size-4 animate-spin" /> : null}
+                    保存数值
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={resetPlannerLimits} disabled={!loaded || savingPlannerConfig}>
+                    恢复当前模式默认
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={resetAllPlannerLimits} disabled={!loaded || savingPlannerConfig}>
+                    恢复全部默认
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <LayersIcon className="size-4" />
+              上下文压缩（清理线 / 摘要线）
+            </CardTitle>
+            <CardDescription>
+              控制四类 Agent（Planner / Worker / 主控 / 对话）在长会话里<b>什么时候开始压缩上下文</b>。
+              底座默认把两条线都绑在模型窗口上：工具输出清理 = 有效窗口 × 60%，历史摘要 = 有效窗口 −
+              缓冲（1.3 万 / 3 万 / 5 万按窗口分档）。窗口按 1M 配置时，两条线分别被推到约
+              <b>59.5 万 / 94.2 万</b> token——实测没有会话能碰到，等于这两个机制不生效。这里可以把它们改成固定值。
+              <span className="mt-2 block">
+                <b>工具输出清理（无损）</b>：超过清理线后，把"保留条数"之外的旧命令 / 网页 / 文件输出正文换成
+                占位符；正文仍可重新读取，不影响证据。<b>历史摘要（有损）</b>：超过摘要线后，把更早的历史换成一段
+                摘要，不可逆。清理线必须小于摘要线。
+              </span>
+              <span className="mt-2 block">
+                保存后对<b>之后启动的 run</b>生效：运行中的会话不换策略，避免中途改写历史打断提示缓存。所有字段
+                留空或 0 = 沿用底座默认（窗口推导）。
+              </span>
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              {CONTEXT_POLICY_PRESETS.map((preset) => (
+                <Button
+                  key={preset.label}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  title={preset.hint}
+                  onClick={() => applyContextPolicyPreset(preset.value)}
+                  disabled={!loaded || savingContextPolicy}
+                >
+                  {preset.label}
+                </Button>
+              ))}
+              <span className="text-[11px] text-muted-foreground">
+                预设只是填入数值，仍需点"保存"；鼠标悬停看每档的摘要触发比例
+              </span>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {CONTEXT_POLICY_FIELDS.map((field) => (
+                <div key={field.key} className="space-y-1.5">
+                  <Label htmlFor={`context-policy-${field.key}`} className="font-normal text-muted-foreground text-xs">
+                    {field.label}
+                  </Label>
+                  <Input
+                    id={`context-policy-${field.key}`}
+                    type="number"
+                    min={field.min}
+                    max={field.max}
+                    step={field.step}
+                    value={contextPolicy[field.key] ?? 0}
+                    disabled={!loaded || savingContextPolicy}
+                    onChange={(e) => updateContextPolicy(field.key, Number(e.target.value))}
+                  />
+                  <p className="text-[11px] text-muted-foreground">{field.description}</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    范围 {field.min}–{field.max}；0 = 沿用底座默认
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" size="sm" onClick={saveContextPolicy} disabled={!loaded || savingContextPolicy}>
+                {savingContextPolicy ? <Loader2Icon className="size-4 animate-spin" /> : null}
+                保存
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={resetContextPolicy} disabled={!loaded || savingContextPolicy}>
+                恢复底座默认（全清空）
+              </Button>
+            </div>
           </CardContent>
         </Card>
 
