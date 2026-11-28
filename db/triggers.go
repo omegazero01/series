@@ -88,6 +88,20 @@ func (d *DB) DeleteTrigger(id int64) error {
 	return err
 }
 
+// DisableReporterToolTriggers disables the legacy on-tool-call reporter trigger.
+// Report generation is handled by the durable finding_report_jobs worker; leaving
+// the old trigger enabled would create a second, unmanaged reporter conversation
+// for every finding. Only the built-in reporter trigger is targeted so custom
+// agents' triggers remain untouched.
+func (d *DB) DisableReporterToolTriggers() error {
+	_, err := d.Exec(`UPDATE agent_triggers
+SET enabled=false, updated_at=now()
+WHERE agent_key='reporter'
+  AND on_tool_call
+  AND tool_names LIKE '%report_finding%'`)
+	return err
+}
+
 // ListTriggersFor returns an agent's triggers.
 func (d *DB) ListTriggersFor(agentKey string) ([]*AgentTrigger, error) {
 	return d.queryTriggers(`SELECT `+triggerCols+` FROM agent_triggers WHERE agent_key=$1 ORDER BY id`, agentKey)

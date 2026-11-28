@@ -82,13 +82,16 @@ export function FindingsToolbar({
 }) {
   return (
     <header className="findings-toolbar">
-      <div className="flex flex-wrap items-baseline gap-2.5">
-        <h2 className="findings-heading">全部发现</h2>
-        <span className="text-muted-foreground tabular-nums" aria-live="polite">
-          {total === undefined ? "正在加载…" : `${total} 条发现`}
-        </span>
+      <div className="findings-toolbar-head">
+        <div className="flex flex-wrap items-baseline gap-2.5">
+          <h2 className="findings-heading">全部发现</h2>
+          <span className="text-muted-foreground tabular-nums" aria-live="polite">
+            {total === undefined ? "正在加载…" : `${total} 条发现`}
+          </span>
+        </div>
+        {actions && <div className="findings-actions">{actions}</div>}
       </div>
-      <div className="findings-search-row">
+      <div className="findings-toolbar-controls">
         <InputGroup data-findings-control="search">
           <InputGroupInput
             type="search"
@@ -103,8 +106,6 @@ export function FindingsToolbar({
           </InputGroupAddon>
         </InputGroup>
         <FindingFilterSelect label="发现排序" sort value={sort} onChange={onSort} options={sortOptions} />
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
         <FindingFilterSelect label="发现范围" value={view} onChange={onView} options={viewOptions} />
         <FindingFilterSelect
           label="按状态筛选"
@@ -142,7 +143,6 @@ export function FindingsToolbar({
           </Button>
         )}
       </div>
-      {actions && <div className="findings-actions">{actions}</div>}
     </header>
   );
 }

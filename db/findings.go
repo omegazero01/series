@@ -33,7 +33,8 @@ type DBFinding struct {
 	Worker          string
 	AssetIDs        []int64
 	Status          string
-	Report          string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
+	Report          string // 人类提交版(Markdown);仅详情/导出填充,列表查询不带
+	ReportDetail    string // 完整技术明细(Markdown);供 context_search 与内部复盘,不导出
 	CreatedAt       time.Time
 	TaskDescription string // populated via LEFT JOIN on tasks
 }
@@ -159,6 +160,8 @@ type FindingFilter struct {
 	TaskID      string // 任务 id(字符串形式;空/非法 = 不按任务筛选)
 	Query       string // 名称/类型/摘要/证据/报告正文的模糊检索关键词
 	Sort        string // "severity" | "time"
+	// ReportMissing 只返回提交版报告为空的漏洞,供发现页「补出提交报告」使用。
+	ReportMissing bool
 	// AssetScope 是资产树的节点 key(a:<id> / c:<id> / r:<domain> / __none__),
 	// 选中一个节点等于选中它的整棵子树。空 = 不按资产筛选。
 	AssetScope string
@@ -190,6 +193,10 @@ func (f FindingFilter) where() (string, []any) {
 	add("severity", f.Severity)
 	add("status", f.Status)
 	add("vulnclass", f.VulnClass)
+	// 提交版报告为空（包括只有技术明细、没有人类提交版的旧记录）。
+	if f.ReportMissing {
+		conds = append(conds, "COALESCE(f.report, '') = ''")
+	}
 	// task_id 是 bigint 列,按整数比较(不能走上面的文本 add);空/非法值忽略。
 	if f.TaskID == FindingUnassignedTask {
 		conds = append(conds, "(f.task_id IS NULL OR t.id IS NULL)")
@@ -478,7 +485,7 @@ RETURNING id, created_at`, s.expID, audit.NodeID, utf8Clean(audit.Worker), utf8C
 // 再按时间倒序,与「导出汇总报告」的分组顺序一致。
 func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, error) {
 	const order = `ORDER BY CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC`
-	cols := findingSelectCols + `, COALESCE(f.report, ''), COALESCE(f.reproduction, 'null'::jsonb)`
+	cols := findingSelectCols + `, COALESCE(f.report, ''), COALESCE(f.report_detail, ''), COALESCE(f.reproduction, 'null'::jsonb)`
 
 	var q string
 	var args []any
@@ -518,7 +525,7 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 		var aidsJSON string
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report, &f.Reproduction); err != nil {
+			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report, &f.ReportDetail, &f.Reproduction); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
@@ -640,13 +647,13 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	f := &DBFinding{}
 	var aidsJSON string
-	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, ''), COALESCE(f.reproduction, 'null'::jsonb)
+	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, ''), COALESCE(f.report_detail, ''), COALESCE(f.reproduction, 'null'::jsonb)
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report, &f.Reproduction)
+		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report, &f.ReportDetail, &f.Reproduction)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -758,9 +765,10 @@ func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
 
 // SetFindingReportByNodeID sets the Markdown report on the standalone finding row
 // whose node_id matches — report_finding returns that node id, so an agent tool
-// can address the finding it just created. Returns rows affected (0 when no row).
+// can address the finding it just created. The legacy helper mirrors the report
+// into both the human submission and the technical-detail field.
 func (d *DB) SetFindingReportByNodeID(nodeID int64, report string) (int64, error) {
-	return d.SetFindingReportVersionByNodeID(context.Background(), nodeID, report, nil)
+	return d.SetFindingReportVersionByNodeID(context.Background(), nodeID, report, report, nil)
 }
 
 // FindingPatch distinguishes omitted fields from explicit empty values.

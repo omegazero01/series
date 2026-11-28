@@ -147,7 +147,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			// so the run's task/session ids ride in on the ctx (agent.RunInfo). Read it
 			// once here — this closure is rebuilt per run, so the captured value always
 			// belongs to this run.
-			extra = append(extra, meterSkillTool(agent.NewVisibleSkillTool(reg), pg, reg, a.Key, runInfo))
+			extra = append(extra, meterSkillTool(reg.Tool(), pg, reg, a.Key, runInfo))
 		}
 
 		// host tools (traffic / orchestration / custom) — added to every agent's base;
@@ -330,6 +330,30 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool, configRoot ...st
 				out[i] = &shellMeteredTool{CoreTool: tool, recorder: pg, declarations: rows, agentKey: agentKey, ri: runInfo, configRoot: root}
 			}
 		}
+		// Bash description addenda: the host execution-environment note is always
+		// attached (on Windows it explains that commands actually run through
+		// PowerShell); user-defined kind="shell" declarations are appended when
+		// present.
+		if note := agent.HostEnvironmentNote() + agent.HostLessonNote() + shellToolNote(rows, agentKey); note != "" {
+			for i, t := range out {
+				if t.Name() == "Bash" {
+					out[i] = agent.DecorateTool(t, t.Description()+note, t.InputSchema())
+					break
+				}
+			}
+		}
+		// Bash extended prompt: the SDK prompt suggests && chaining and heredocs,
+		// which Windows PowerShell rejects, and it sits after the host note in the
+		// rendered description. Replace it where the host says so (see
+		// agent.BashPromptOverride); the note above carries the accurate guidance.
+		if prompt, ok := agent.BashPromptOverride(); ok {
+			for i, t := range out {
+				if t.Name() == "Bash" {
+					out[i] = agent.OverrideToolPrompt(t, prompt)
+					break
+				}
+			}
+		}
 		out = configureShellToolHelp(out, rows, agentKey, pg.ListTools)
 		// interactive shell: gated purely by the agent's interactive_shell flag (like
 		// web_search), NOT by tools-table binding. When on, inject the 5 shell_* tools
@@ -346,7 +370,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool, configRoot ...st
 				}
 			}
 		}
-		return configureBuiltinLoading(ctx, pg, agentKey, out, rows)
+		return out, nil
 	}
 }
 

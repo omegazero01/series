@@ -433,10 +433,10 @@ func (s *Server) toolGetTaskNodeDetail() actool.CoreTool {
 // task-agnostic, so this host tool needs no task_id / exploration store.
 func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 	return wrTool("update_finding_report",
-		"为已登记的漏洞写入或更新 Markdown 报告全文。finding_node_id 传 report_finding 返回的探索节点 ID。用简短自然语言写资产发现路径、危害及严重等级、漏洞发现路径、连续的复现记录、50 字内修复建议。引用已保存的证据编号，明确说明缺失的证据。",
+		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_node_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告采用资产发现路径、危害及严重等级、漏洞发现路径、自然语言分步复现、50字内修复建议；真实报文/命令逐字保留，缺失证据明确说明。",
 		objSchema(map[string]any{
 			"finding_node_id":  positiveIDParam("report_finding 返回的 finding_node_id（探索节点），正整数或数字字符串"),
-			"report":           strParam("详细报告全文,Markdown 格式"),
+			"report":           strParam("提交报告全文,Markdown 格式；字数预算见工具说明；技术附录用 SERIES:TECHNICAL 注释块包住"),
 			"evidence_version": map[string]any{"type": "integer", "description": "get_finding_traffic 返回的证据 version；用于防止报告覆盖新的证据变更"},
 		}, "finding_node_id", "report"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
@@ -459,14 +459,18 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			if err := s.agentFindingTrafficAccess(ctx, findingID, true); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			n, err := s.m.pg.SetFindingReportVersionByNodeID(ctx, nodeID, a.Report, a.EvidenceVersion)
+			if err := validateFindingReport(a.Report); err != nil {
+				return actool.Errorf("报告格式不符合固定模板: " + err.Error()), nil
+			}
+			human, detail := splitFindingReport(a.Report)
+			n, err := s.m.pg.SetFindingReportVersionByNodeID(ctx, nodeID, human, detail, a.EvidenceVersion)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 			if n == 0 {
 				return actool.Errorf(fmt.Sprintf("未找到 finding_node_id=%d 对应的漏洞记录(先用 report_finding 登记)", nodeID)), nil
 			}
-			return actool.Text(fmt.Sprintf("finding %d report updated (%d chars)", nodeID, len(a.Report))), nil
+			return actool.Text(fmt.Sprintf("finding %d report updated (submission %d chars, technical %d chars)", nodeID, len([]rune(human)), len([]rune(detail)))), nil
 		})
 }
 
@@ -508,6 +512,7 @@ func (s *Server) seedOrchestrationTools() {
 	// Context catalog migration preserves the currently configured bindings and
 	// only replaces exact code-default prompts; superseded reseeds must not run.
 	s.seedReporterAgent()             // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.reseedReporterPrompt()          // 老库把旧默认提示词刷成固定 SRC 报告模板(保留用户自定义)
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
 	s.seedFindingWorkflowTools()
@@ -816,18 +821,44 @@ func (s *Server) seedReporterAgent() {
 	}); err != nil {
 		log.Printf("[reporter] 绑定工具失败: %v", err)
 	}
-	// 触发器：report_finding 被调用即触发（工具返回 "finding recorded: <id>" 带上 finding_id，
-	// 任务 id 也在触发消息里）。
-	if _, err := s.m.pg.CreateTrigger(&db.AgentTrigger{
-		AgentKey:        "reporter",
-		Enabled:         true,
-		OnToolCall:      true,
-		ToolNames:       []string{"report_finding"},
-		ToolCallMessage: reporterToolCallMessage,
-	}); err != nil {
-		log.Printf("[reporter] 创建触发器失败: %v", err)
+	// 触发方式：报告生成已改由 finding_report_jobs 持久化 worker 负责。
+	// 不再创建 report_finding 的 P3 触发队列，避免一次漏洞登记同时启动两个
+	// 报告会话；历史库里的旧触发器由 disableLegacyReporterTrigger 一次性禁用。
+	log.Printf("[reporter] 已预置「报告撰写」agent；报告任务由持久化 worker 处理")
+}
+
+// reseedReporterPrompt upgrades only the known old reporter defaults to the
+// current fixed SRC report template (v2 adds the 2026-10-26 length budgets).
+// A prompt the user edited is left untouched; the version history keeps the
+// old prompt available from the UI.
+func (s *Server) reseedReporterPrompt() {
+	const flag = "reporter_prompt_src_template_v2"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
 	}
-	log.Printf("[reporter] 已预置「报告撰写」agent + finding 触发器")
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }()
+	a, err := s.m.pg.GetAgentByKey("reporter")
+	if err != nil || a == nil {
+		return
+	}
+	tmpl := agent.ReporterDefaultPrompt
+	cur, err := s.m.pg.CurrentPrompt(a.ID)
+	if err != nil {
+		log.Printf("[reporter] 读取当前提示词失败: %v", err)
+		return
+	}
+	if cur == tmpl {
+		return
+	}
+	if !agent.IsLegacyReporterPrompt(cur) {
+		log.Printf("[reporter] 当前提示词已被用户修改，保留自定义内容，不自动覆盖")
+		return
+	}
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+		log.Printf("[reporter] 提示词升级为固定报告模板失败: %v", err)
+		return
+	}
+	log.Printf("[reporter] 提示词已升级为固定 SRC 报告模板(旧版本保留)")
 }
 
 // seedAutoReportFindingBinding adds "auto" to report_finding's binding ONCE so

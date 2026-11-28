@@ -1402,13 +1402,18 @@ CREATE TABLE IF NOT EXISTS findings (
     -- false_positive 误报 / ignored 忽略 / duplicate 重复 / risk_accepted 风险接受。
     -- 取值不加 CHECK：旧库靠下面的 ALTER 补列,CHECK 无法回填,统一由 server 侧白名单校验。
     status      TEXT NOT NULL DEFAULT 'pending',
-    -- 漏洞详细报告(Markdown)；默认空,仅详情页读取/展示,不进列表接口以免 payload 膨胀。
+    -- 漏洞提交报告(Markdown)；人类查看/导出的精简版，技术细节放 report_detail。
     report      TEXT NOT NULL DEFAULT '',
+    -- 漏洞技术明细(Markdown)；保存完整验证细节，供 context_search/内部复盘使用，不导出。
+    report_detail TEXT NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS name   TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_detail TEXT NOT NULL DEFAULT '';
+-- 旧库升级：旧 report 同时承担提交版和技术明细；先原样复制，保证技术内容不丢。
+UPDATE findings SET report_detail = report WHERE report_detail = '' AND report <> '';
 CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id, created_at DESC);
 -- Task selectors anti-join legacy graph nodes before pagination.
 CREATE INDEX IF NOT EXISTS idx_findings_task_node ON findings(task_id, node_id) WHERE node_id IS NOT NULL;
@@ -1715,3 +1720,30 @@ ALTER TABLE finding_suppression_rules ADD COLUMN IF NOT EXISTS targets JSONB NOT
 
 -- Structured, immutable reproduction captured at discovery time.
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS reproduction JSONB;
+
+-- Durable report work items. A finding gets one row; the report worker owns
+-- execution and retries, while the finding record stays independent.
+CREATE TABLE IF NOT EXISTS finding_report_jobs (
+    id              BIGSERIAL PRIMARY KEY,
+    finding_id      BIGINT NOT NULL UNIQUE REFERENCES findings(id) ON DELETE CASCADE,
+    node_id         BIGINT,
+    task_id         BIGINT,
+    title            TEXT NOT NULL DEFAULT '',
+    message          TEXT NOT NULL DEFAULT '',
+    task_desc        TEXT NOT NULL DEFAULT '',
+    task_goal        TEXT NOT NULL DEFAULT '',
+    llm_profile_id   BIGINT,
+    source           TEXT NOT NULL DEFAULT 'initial',
+    status           TEXT NOT NULL DEFAULT 'pending',
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    max_attempts     INTEGER NOT NULL DEFAULT 8,
+    next_run_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_until      TIMESTAMPTZ,
+    last_error       TEXT NOT NULL DEFAULT '',
+    started_at       TIMESTAMPTZ,
+    finished_at      TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_finding_report_jobs_due
+    ON finding_report_jobs(status, next_run_at, id);

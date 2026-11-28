@@ -107,7 +107,12 @@ func (j *recoveryJournal) openIndex() error {
 	if err = f.Close(); err != nil {
 		return err
 	}
-	u := url.URL{Scheme: "file", Path: path}
+	// Windows 路径需要前导斜杠，否则 file: 会把盘符当主机名（C:%5C... 非法授权）。
+	p := filepath.ToSlash(path)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	u := url.URL{Scheme: "file", Path: p}
 	db, err := sql.Open("sqlite", u.String()+"?_pragma=busy_timeout(1000)")
 	if err != nil {
 		return err

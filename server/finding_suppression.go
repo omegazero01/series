@@ -133,6 +133,9 @@ func (r *findingSuppressionService) Record(ctx context.Context, in db.RecordFind
 		if errors.Is(err, db.ErrSuppressionChanged) {
 			continue
 		}
+		if err == nil && out != nil {
+			r.s.enqueueInitialFindingReportJob(out, in)
+		}
 		return out, err
 	}
 	return nil, db.ErrSuppressionChanged

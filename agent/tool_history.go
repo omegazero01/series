@@ -106,9 +106,7 @@ func normalizedReadQuery(name string, raw json.RawMessage) string {
 			defaults["index"] = json.Number("0")
 		}
 	default:
-		if retiredRetrievalKind(name) == "" {
-			return ""
-		}
+		return ""
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -138,7 +136,37 @@ func normalizedReadQuery(name string, raw json.RawMessage) string {
 }
 
 func deduplicateToolHistory(req llm.CompletionRequest) llm.CompletionRequest {
-	return deduplicateReadHistory(req, 1024, 1024)
+	type position struct{ m, b int }
+	calls := map[string]string{}
+	latest := map[string]position{}
+	var replaced []position
+	for mi, m := range req.Messages {
+		for bi, b := range m.Content {
+			if b.Type == llm.BlockToolUse {
+				call := assetContextCall(b)
+				calls[b.ID] = normalizedReadQuery(call.Name, call.Input)
+			}
+			if b.Type != llm.BlockToolResult || b.IsError || partialReadFailure(calls[b.ToolUseID], b) {
+				continue
+			}
+			key := calls[b.ToolUseID]
+			if key == "" {
+				continue
+			}
+			if old, ok := latest[key]; ok {
+				replaced = append(replaced, old)
+			}
+			latest[key] = position{mi, bi}
+		}
+	}
+	if len(replaced) == 0 {
+		return req
+	}
+	req = cloneToolMessages(req)
+	for _, pos := range replaced {
+		req.Messages[pos.m].Content[pos.b].Content = []llm.ContentBlock{{Type: llm.BlockText, Text: `{"message":"同一查询页已有后续结果，此历史正文已在模型视图中省略"}`}}
+	}
+	return req
 }
 
 // Batched reads intentionally report per-item errors without failing valid

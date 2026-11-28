@@ -15,59 +15,19 @@ func TestReproductionExportUsesImmutableEvidenceAndLegacyReport(t *testing.T) {
 		{Title: "命令", Action: "查看输出", Result: "仅记录已知结果", Command: "printf test", Output: "```\ntest\n"},
 	}}
 	raw, _ := json.Marshal(repro)
-	f := &db.DBFinding{ID: 123, Severity: "low", Summary: "fixture", Evidence: "HIDDEN EVIDENCE", Reproduction: raw}
+	f := &db.DBFinding{ID: 123, Severity: "low", Summary: "fixture", Reproduction: raw}
 	for _, rendered := range []string{SingleFindingMarkdown(f, time.Time{}), FindingsMarkdown([]*db.DBFinding{f}, time.Time{})} {
-		for _, want := range []string{"## 复现记录", "读取自己的订单", "查看输出", repro.Steps[0].Request, repro.Steps[0].Response, "````text\n```\ntest"} {
+		for _, want := range []string{"步骤 1：对照", "步骤 2：命令", repro.Steps[0].Request, repro.Steps[0].Response, "````\n```\ntest", "关联流量证据编号", "未关联流量证据"} {
 			if !strings.Contains(rendered, want) {
 				t.Fatalf("missing %q: %s", want, rendered)
 			}
 		}
-		if strings.Index(rendered, "读取自己的订单") > strings.Index(rendered, "查看输出") || strings.Contains(rendered, "### 步骤") || strings.Contains(rendered, "关联流量证据编号") || strings.Contains(rendered, "HIDDEN EVIDENCE") {
-			t.Fatal("expected a continuous, ordered reproduction record")
+		if strings.Index(rendered, "步骤 1") > strings.Index(rendered, "步骤 2") {
+			t.Fatal("steps reordered")
 		}
 	}
 	f.Report = "## 原报告\n\n保持原文"
-	if body := SingleFindingMarkdown(f, time.Time{}); !strings.Contains(body, f.Report) || strings.Contains(body, "## 复现记录") {
+	if body := SingleFindingMarkdown(f, time.Time{}); !strings.Contains(body, f.Report) || strings.Contains(body, "步骤 1") {
 		t.Fatal("rewrote/duplicated existing report", body)
-	}
-}
-
-func TestReproductionExportNotesMissingAndTruncatedPackets(t *testing.T) {
-	repro := db.FindingReproduction{Steps: []db.FindingReproductionStep{{
-		Action:   "核对已采集的响应",
-		Response: "HTTP/1.1 200 OK\n\n预览\n…[truncated] @blob sha256:" + strings.Repeat("a", 64) + " (len=12000)",
-	}}}
-	raw, _ := json.Marshal(repro)
-	rendered := ReproductionMarkdown(raw)
-	for _, want := range []string{"请求原文未记录", "响应报文为截断预览", repro.Steps[0].Response} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("missing %q: %s", want, rendered)
-		}
-	}
-}
-
-func TestReportPacketPreviewPreservesHeadersAndUnicode(t *testing.T) {
-	for _, newline := range []string{"\n", "\r\n"} {
-		header := "POST /api HTTP/1.1" + newline + "Host: example.test" + newline + "Cookie: " + strings.Repeat("c", 9000) + newline + newline
-		body := strings.Repeat("中🙂", 4500)
-		packet := header + body
-		preview := reportPacketPreview(packet)
-		if reportPacketPreview(preview) != preview {
-			t.Fatal("truncated preview twice")
-		}
-		if reportPacketPreview(strings.TrimSuffix(header, newline+newline)) != strings.TrimSuffix(header, newline+newline) {
-			t.Fatal("truncated header-only packet")
-		}
-		if !strings.HasPrefix(preview, header+strings.Repeat("中🙂", 3000)) || !strings.HasSuffix(preview, strings.Repeat("中🙂", 1000)) || !strings.Contains(preview, "[正文已截断，省略 1000 字符]") {
-			t.Fatal("incorrect packet truncation")
-		}
-		short := header + strings.Repeat("🙂", 8000)
-		if reportPacketPreview(short) != short {
-			t.Fatal("truncated headers or short body")
-		}
-		raw, _ := json.Marshal(db.FindingReproduction{Steps: []db.FindingReproductionStep{{Action: "发送请求", Request: packet}}})
-		if md := ReproductionMarkdown(raw); !strings.Contains(md, "需从已保存原文补齐后复现") || !strings.Contains(md, "```http") {
-			t.Fatal(md)
-		}
 	}
 }

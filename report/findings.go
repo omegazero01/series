@@ -33,7 +33,7 @@ func findingTitle(f *db.DBFinding) string {
 }
 
 // FindingsMarkdown 把一批 findings 整合成一份汇总报告(摘要 + 按严重等级分组,
-// 每条含类别/状态/所属任务/详细报告)。
+// 每条含类别/状态/所属任务/证据/详细报告)。
 func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 	items := append([]*db.DBFinding(nil), fs...)
 	sortFindingsForExport(items)
@@ -76,12 +76,15 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 		if s := strings.TrimSpace(f.Summary); s != "" {
 			fmt.Fprintf(&b, "%s\n\n", s)
 		}
+		if e := strings.TrimSpace(f.Evidence); e != "" {
+			fmt.Fprintf(&b, "**证据：**\n\n```\n%s\n```\n\n", e)
+		}
 		if rep := findingReportBody(f); rep != "" {
 			b.WriteString("**详细报告：**\n\n")
 			b.WriteString(rep)
 			b.WriteString("\n\n")
 		}
-		b.WriteString(findingReportNotice(f))
+		b.WriteString(findingTrafficMarkdown(f, false))
 		b.WriteString("---\n\n")
 	}
 	return b.String()
@@ -104,16 +107,79 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 	if s := strings.TrimSpace(f.Summary); s != "" {
 		fmt.Fprintf(&b, "## 概述\n\n%s\n\n", s)
 	}
+	if e := strings.TrimSpace(f.Evidence); e != "" {
+		fmt.Fprintf(&b, "## 证据\n\n```\n%s\n```\n\n", e)
+	}
 	if rep := findingReportBody(f); rep != "" {
 		b.WriteString("## 详细报告\n\n")
 		b.WriteString(rep)
 		b.WriteString("\n")
 	}
-	b.WriteString(findingReportNotice(f))
+	b.WriteString(findingTrafficMarkdown(f, true))
 	return b.String()
 }
 
 var unsafeFilenameChars = regexp.MustCompile(`[^\p{Han}\p{L}\p{N}._-]+`)
+
+// FindingReportTitle 提取人类提交版里的“漏洞名称”字段。不能直接用
+// findings.name：那通常是 worker 生成的长标题，提交报告里才是归纳后的标题。
+func FindingReportTitle(f *db.DBFinding) string {
+	if f == nil {
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(f.Report), "\n") {
+		line = strings.TrimSpace(line)
+		const prefix = "**漏洞名称：**"
+		if strings.HasPrefix(line, prefix) {
+			if title := strings.TrimSpace(strings.TrimPrefix(line, prefix)); title != "" {
+				return title
+			}
+		}
+	}
+	return findingTitle(f)
+}
+
+// FindingReportFilename 为提交版导出生成安全的 .md 文件名。
+func FindingReportFilename(f *db.DBFinding) string {
+	title := FindingReportTitle(f)
+	name := unsafeFilenameChars.ReplaceAllString(title, "_")
+	name = strings.Trim(name, "._")
+	if name == "" {
+		name = fmt.Sprintf("finding_%d", f.ID)
+	}
+	if len([]rune(name)) > 100 {
+		name = string([]rune(name)[:100])
+	}
+	return name + ".md"
+}
+
+// SingleFindingReportMarkdown 只渲染人类提交版。技术明细保存在
+// findings.report_detail，不追加到导出文件里。
+func SingleFindingReportMarkdown(f *db.DBFinding) string {
+	if f == nil {
+		return ""
+	}
+	report := strings.TrimSpace(f.Report)
+	if report == "" {
+		return ""
+	}
+	return report + "\n"
+}
+
+// FindingsReportMarkdown 是单文件提交版导出；多漏洞请优先用一漏洞一文件的
+// ZIP 导出，避免把多份报告混在一个文件里。
+func FindingsReportMarkdown(fs []*db.DBFinding) string {
+	items := append([]*db.DBFinding(nil), fs...)
+	sortFindingsForExport(items)
+	var b strings.Builder
+	for i, f := range items {
+		if i > 0 {
+			b.WriteString("\n---\n\n")
+		}
+		b.WriteString(SingleFindingReportMarkdown(f))
+	}
+	return b.String()
+}
 
 // FindingFilename 为「一漏洞一文件」生成安全的 .md 文件名,形如
 // `critical_SQL注入_#123.md`。去掉路径分隔符与控制字符,避免 zip 内非法路径。
@@ -135,7 +201,8 @@ func FindingFilename(f *db.DBFinding) string {
 }
 
 // FindingsCSV 把一批 findings 渲染成 CSV(带 UTF-8 BOM,便于 Excel 正确识别中文)。
-// 不含大段 report/evidence 全文,只放摘要类字段;需要全文用 Markdown/JSON 导出。
+// 与 Markdown/JSON 导出一致，只输出人类提交版 report：名称取提交报告里的
+// “漏洞名称”，正文放完整 findings.report；不输出 summary/evidence/技术明细。
 func FindingsCSV(fs []*db.DBFinding) []byte {
 	items := append([]*db.DBFinding(nil), fs...)
 	sortFindingsForExport(items)
@@ -143,18 +210,17 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID"})
+	_ = w.Write([]string{"ID", "漏洞名称", "漏洞等级", "漏洞类型", "状态", "所属任务", "发现时间", "提交报告"})
 	for _, f := range items {
 		_ = w.Write([]string{
 			fmt.Sprintf("%d", f.ID),
-			findingTitle(f),
-			f.VulnClass,
+			FindingReportTitle(f),
 			nz(f.Severity, "info"),
+			f.VulnClass,
 			nz(f.Status, "pending"),
 			f.TaskDescription,
 			f.CreatedAt.Format("2006-01-02 15:04:05"),
-			strings.TrimSpace(f.Summary),
-			fmt.Sprint(len(f.TrafficBindings)), findingTrafficIDs(f),
+			strings.TrimSpace(f.Report),
 		})
 	}
 	w.Flush()
@@ -169,11 +235,28 @@ func findingTrafficIDs(f *db.DBFinding) string {
 	return strings.Join(ids, ",")
 }
 
-func findingReportNotice(f *db.DBFinding) string {
-	if f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion {
-		return "\n流量证据已变更，报告待更新。\n\n"
+func findingTrafficMarkdown(f *db.DBFinding, attachments bool) string {
+	stale := f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion
+	if len(f.TrafficBindings) == 0 && !stale {
+		return ""
 	}
-	return ""
+	var out strings.Builder
+	out.WriteString("\n## 关联流量证据\n\n")
+	fmt.Fprintf(&out, "证据版本：%d；绑定数量：%d。\n\n", f.EvidenceVersion, len(f.TrafficBindings))
+	if stale {
+		out.WriteString("证据已变更，详细报告待更新。\n\n")
+	}
+	for i, b := range f.TrafficBindings {
+		fmt.Fprintf(&out, "%d. **证据 #%d · %s** — `%s %s`，状态码 %d\n", i+1, b.ID, b.Role, b.Snapshot.Method, strings.ReplaceAll(b.Snapshot.URL, "`", "%60"), b.Snapshot.Status)
+		if b.Note != "" {
+			fmt.Fprintf(&out, "   %s\n", strings.ReplaceAll(b.Note, "\n", "\n   "))
+		}
+		if attachments {
+			fmt.Fprintf(&out, "   [请求报文](evidence/%d/%d/request.http) · [响应报文](evidence/%d/%d/response.http)\n", f.ID, b.ID, f.ID, b.ID)
+		}
+	}
+	out.WriteString("\n")
+	return out.String()
 }
 
 func findingReportBody(f *db.DBFinding) string {

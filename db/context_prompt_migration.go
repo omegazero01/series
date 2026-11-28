@@ -114,17 +114,3 @@ var legacyFindingReportParameter = regexp.MustCompile(`(?s)\bupdate_finding_repo
 func (d *DB) MigrateFindingReproductionPrompts(reporter string) error {
 	return d.migratePromptContracts("finding_reproduction_prompts_v1", "finding_reproduction_prompts_report_v1", map[string]string{"reporter": reporter}, map[string][]string{"reporter": {"bedffb29857b4bec88751dc7cca61e00f3f8d94755a1456ff19094c63c895ca8"}})
 }
-
-// MigrateConciseFindingReportPrompt updates the previously seeded Reporter template.
-func (d *DB) MigrateConciseFindingReportPrompt(reporter string) error {
-	return d.migratePromptContracts("finding_report_concise_v1", "finding_report_concise_migration_v1",
-		map[string]string{"reporter": reporter},
-		map[string][]string{"reporter": {"bc72d8c45517aedffc64730edc2b05af6a867bb6bfa8ca170a93cd68c53d06c6"}})
-}
-
-// MigrateInlineHTTPReportPrompt preserves customized prompts and prior versions.
-func (d *DB) MigrateInlineHTTPReportPrompt(reporter string) error {
-	return d.migratePromptContracts("finding_report_inline_http_v1", "finding_report_inline_http_migration_v1",
-		map[string]string{"reporter": reporter},
-		map[string][]string{"reporter": {"0f33f6646416207cfcaab1205702ee63e594f5b8b71ee8a3e0b4b163202b0a5a"}})
-}

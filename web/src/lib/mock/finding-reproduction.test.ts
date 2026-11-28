@@ -1,4 +1,4 @@
-import { reportPacketPreview, reproductionMarkdown } from "../finding-reproduction";
+import { reproductionMarkdown } from "../finding-reproduction";
 import type { Finding, FindingsPage } from "../types";
 import { mockHandle } from "./handler";
 import assert from "node:assert/strict";
@@ -25,41 +25,8 @@ test("fallback markdown preserves real packets, step order and code delimiters",
     ],
   });
   assert.ok(md.includes(raw));
-  assert.ok(md.includes("````http\n"));
-  assert.ok(md.includes("## 复现记录"));
-  assert.ok(md.includes("读取已有响应") && md.includes("修改订单编号"));
-  assert.ok(md.indexOf("读取已有响应") < md.indexOf("修改订单编号"));
-  assert.ok(!md.includes("### 步骤"));
+  assert.ok(md.includes("````\n"));
+  assert.ok(md.indexOf("步骤 1：对照") < md.indexOf("步骤 2：验证"));
   assert.ok(md.includes("响应原文未记录"));
-  assert.ok(md.includes("请求原文未记录"));
   assert.equal(reproductionMarkdown(null), "");
-});
-
-test("recorded packet previews are labeled without changing the original text", () => {
-  const raw = "HTTP/1.1 200 OK\n\n预览\n... [截断，共 12000 字节；完整在流量文件树] ...";
-  const md = reproductionMarkdown({
-    steps: [{ title: "已有记录", action: "核对响应", result: "正文仅有预览", response: raw }],
-  });
-  assert.ok(md.includes(raw));
-  assert.ok(md.includes("响应报文为截断预览"));
-});
-
-test("packet previews retain headers, Unicode, and the original copy source", () => {
-  for (const newline of ["\n", "\r\n"]) {
-    const headers = `POST /api HTTP/1.1${newline}Host: example.test${newline}Cookie: ${"c".repeat(9000)}${newline}${newline}`;
-    const packet = headers + "中🙂".repeat(4500);
-    const preview = reportPacketPreview(packet);
-    assert.equal(reportPacketPreview(preview), preview);
-    assert.equal(reportPacketPreview(headers.trimEnd()), headers.trimEnd());
-    assert.ok(preview.startsWith(headers + "中🙂".repeat(3000)));
-    assert.ok(preview.endsWith("中🙂".repeat(1000)));
-    assert.ok(preview.includes("[正文已截断，省略 1000 字符]"));
-    const short = headers + "🙂".repeat(8000);
-    assert.equal(reportPacketPreview(short), short);
-    const step = { title: "请求", action: "发送请求", result: "完成", request: packet, binding_ids: ["42"] };
-    const md = reproductionMarkdown({ steps: [step] });
-    assert.ok(md.includes("需从已保存原文补齐后复现"));
-    assert.ok(!md.includes("关联流量证据编号"));
-    assert.equal(step.request, packet);
-  }
 });

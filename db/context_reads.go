@@ -87,7 +87,7 @@ const contextNodeFields = `VALUES
  ('/evidence',COALESCE(n.payload->>'evidence','')),
  ('/text',COALESCE(n.payload->>'text','')),
  ('/body',COALESCE(n.payload->>'body','')),
- ('/report',CASE WHEN n.kind='finding' THEN COALESCE((SELECT f.report FROM findings f WHERE f.node_id=n.id LIMIT 1),'') ELSE '' END)
+ ('/report',CASE WHEN n.kind='finding' THEN COALESCE(NULLIF((SELECT f.report_detail FROM findings f WHERE f.node_id=n.id LIMIT 1),''),(SELECT f.report FROM findings f WHERE f.node_id=n.id LIMIT 1),'') ELSE '' END)
  UNION ALL SELECT '/reproduction/entry_point',n.payload#>>'{reproduction,entry_point}'
  WHERE n.kind='finding' AND jsonb_typeof(n.payload#>'{reproduction,entry_point}')='string'
  UNION ALL SELECT '/reproduction/prerequisites/'||(p.ordinality-1),p.value#>>'{}'
@@ -97,6 +97,7 @@ const contextNodeFields = `VALUES
  FROM jsonb_array_elements(CASE WHEN n.kind='finding' AND jsonb_typeof(n.payload#>'{reproduction,steps}')='array' THEN n.payload#>'{reproduction,steps}' ELSE '[]'::jsonb END) WITH ORDINALITY s(value,ordinality)
  CROSS JOIN (VALUES ('title'),('action'),('result'),('proves'),('request'),('response'),('command'),('output')) f(key)
  WHERE jsonb_typeof(s.value)='object' AND jsonb_typeof(s.value->f.key)='string'`
+
 
 func (s *ExplorationStore) ContextUpper(ctx context.Context, activity bool) (int64, error) {
 	table := "exploration_nodes"
@@ -240,7 +241,10 @@ func (s *ExplorationStore) ContextNode(ctx context.Context, id int64, field stri
  SELECT n.id,n.kind,n.state,v.owner,n.exploration_id<>$1 inherited,
  CASE WHEN n.kind='finding' THEN COALESCE((SELECT f.id FROM findings f WHERE f.node_id=n.id LIMIT 1),0) ELSE 0 END finding_id,
  (CASE WHEN $3::text[]=ARRAY['asset_ids'] THEN jsonb_build_object('asset_ids',COALESCE((SELECT jsonb_agg(DISTINCT a.asset_id ORDER BY a.asset_id) FROM anchors a WHERE a.root=n.id),'[]'::jsonb))
- WHEN n.kind='finding' THEN n.payload||jsonb_build_object('report',COALESCE((SELECT f.report FROM findings f WHERE f.node_id=n.id LIMIT 1),'')) ELSE n.payload END)#>$3::text[] value
+ WHEN n.kind='finding' THEN n.payload||jsonb_build_object(
+  'report',COALESCE(NULLIF((SELECT f.report_detail FROM findings f WHERE f.node_id=n.id LIMIT 1),''),(SELECT f.report FROM findings f WHERE f.node_id=n.id LIMIT 1),''),
+  'report_human',COALESCE((SELECT f.report FROM findings f WHERE f.node_id=n.id LIMIT 1),'')
+ ) ELSE n.payload END)#>$3::text[] value
  FROM visible v JOIN exploration_nodes n ON n.id=v.id
  ), children AS (
  SELECT child.key,child.value, row_number() OVER(ORDER BY child.key) seq FROM content c CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(c.value)='object' THEN c.value ELSE '{}'::jsonb END) child
