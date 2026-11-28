@@ -32,10 +32,11 @@ type ChatAgent struct {
 	proxyAddr      string
 	proxyCACert    string
 	webSearch      WebSearchOpts
-	guard          *guard.Guard // optional; nil disables intercept hooks for chat
-	nonStreamingFn func() bool  // resolver: use non-streaming (Complete) path? (nil = streaming)
-	noaEnabledFn   func() bool  // resolver: use experimental noa compaction? (nil = off)
-	maxTokensFn    func() int   // resolver: per-reply output cap (nil/0 = send no cap)
+	guard          *guard.Guard               // optional; nil disables intercept hooks for chat
+	nonStreamingFn func() bool                // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn   func() bool                // resolver: use experimental noa compaction? (nil = off)
+	ctxPolicyFn    func() ContextPolicyConfig // resolver: 自定义上下文线(清理/摘要)，nil = 内置窗口推导
+	maxTokensFn    func() int                 // resolver: per-reply output cap (nil/0 = send no cap)
 	taskAssets     *db.AssetStore
 	taskID         int64
 }
@@ -63,6 +64,12 @@ func (c *ChatAgent) nonStreaming() bool { return c.nonStreamingFn != nil && c.no
 // noa context-compression mechanism. nil/unset = off (built-in compaction). Read
 // per run so the settings toggle takes effect without rebuilding the agent.
 func (c *ChatAgent) SetNoaEnabled(fn func() bool) { c.noaEnabledFn = fn }
+
+// SetContextPolicy wires a resolver returning the custom context lines (tool-result
+// clear line / history summary line). nil or all-zero = keep the SDK's window-derived
+// defaults, i.e. behaviour identical to before this feature. Read per run, so a
+// settings change takes effect on the next run without rebuilding the agent.
+func (c *ChatAgent) SetContextPolicy(fn func() ContextPolicyConfig) { c.ctxPolicyFn = fn }
 
 // SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
@@ -174,7 +181,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		ToolOutputDir: filepath.Join(sessionWorkDir, "cmd-output"),
 		// 命中预算(步数)→ SDK 跑收尾:输出一句总结。Prompt 与收尾轮数按本 agent key 后台可编辑
 		// (自定义 agent 各自一份;留空/0 用通用默认:10 轮)。
-		Settlement:   wrapupSettlement(agentKey, nil),
+		Settlement:   wrapupSettlement(agentKey),
 		NonStreaming: c.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    c.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
@@ -189,6 +196,8 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	}
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
 	enableNoa(&opts, c.noaEnabledFn, c.workDir, "chat-"+sessionID, noaWarn("chat-"+sessionID))
+	// 自定义上下文线（清理/摘要），未配置时保持内置窗口推导。
+	applyContextPolicy(&opts, c.ctxPolicyFn, c.window)
 	ctx = attachSideCapture(ctx, &opts)
 	s, closeSession, err := newSession(opts)
 	if err != nil {

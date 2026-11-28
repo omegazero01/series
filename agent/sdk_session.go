@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"log"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
@@ -18,7 +21,13 @@ import (
 // newSession integrates SERIES policy through public SDK extension points only.
 // The official dispatcher calls targets directly, so our outer hook must resolve
 // their identity before applying business policy. No SDK source is replaced.
-func newSession(opts agentcore.Options) (conversationSession, func(), error) {
+//
+// settleGuard names the tools that must stay executable-free during the wrap-up
+// phase but *remain declared* in the request. Hiding them (Settlement.DisabledTools)
+// rewrites the tool array — which sits before the whole transcript — and therefore
+// invalidates the provider cache for every wrap-up turn. Gating them here keeps the
+// request prefix byte-stable for the entire run instead.
+func newSession(opts agentcore.Options, settleGuard ...string) (conversationSession, func(), error) {
 	configureWorkerMemory(&opts)
 	if opts.ToolOutputDir != "" && opts.MaxToolOutputChars <= 0 {
 		opts.MaxToolOutputChars = 12 << 10
@@ -54,6 +63,7 @@ func newSession(opts agentcore.Options) (conversationSession, func(), error) {
 		opts.UnlockSet = actool.NewUnlockSet(opts.DeferredTools...)
 	}
 	policy := newDispatchHooks(opts)
+	policy.watchSettlement(opts.Settlement, settleGuard...)
 	policy.ptys = ptys
 	// Only supply recheck context here: replacing Call would bypass the existing
 	// binding/default/usage decorators. Deferred targets use this registry too.
@@ -269,6 +279,14 @@ type dispatchHooks struct {
 	schemaVisible  map[string]bool
 	schemaPressure toolSchemaPressure
 	builtins       *builtinCatalog
+	// Wrap-up gate (see newSession): settlePrompts are the exact texts the SDK may
+	// inject when a run exhausts its budget; once one of them shows up as the last
+	// message, settleGuard tools are refused for the rest of the run. The tool array
+	// itself is never touched, so the request prefix (and cache) stays stable.
+	settlePrompts []string
+	settleGuard   map[string]bool
+	settleNames   []string
+	settling      atomic.Bool
 }
 
 // The official SDK hides Settlement.DisabledTools from request schemas but
@@ -297,27 +315,28 @@ func (h *dispatchHooks) observeModelCalls(opts *agentcore.Options) {
 			if err := intentInputRetryError(ctx); err != nil {
 				return func(yield func(llm.StreamEvent, error) bool) { yield(llm.StreamEvent{}, err) }
 			}
-			if h.builtins != nil {
-				settling := h.phaseTargets != nil
-				for _, schema := range req.Tools {
-					if schema.Name == settlementMarkerName {
-						settling = false
+				if h.builtins != nil {
+					settling := h.phaseTargets != nil
+					for _, schema := range req.Tools {
+						if schema.Name == settlementMarkerName {
+							settling = false
+						}
+					}
+					var err error
+					req, err = h.builtins.project(ctx, req, settling)
+					if err != nil {
+						return func(yield func(llm.StreamEvent, error) bool) { yield(llm.StreamEvent{}, err) }
 					}
 				}
-				var err error
-				req, err = h.builtins.project(ctx, req, settling)
-				if err != nil {
-					return func(yield func(llm.StreamEvent, error) bool) { yield(llm.StreamEvent{}, err) }
+				req = h.projectToolDocumentation(req)
+				if h.builtins != nil {
+					req = h.builtins.applyPressure(req)
 				}
-			}
-			req = h.projectToolDocumentation(req)
-			if h.builtins != nil {
-				req = h.builtins.applyPressure(req)
-			}
-			h.observeTools(req.Tools)
-			req = withoutSettlementMarker(req)
-			h.observeDiscoveredSchemas(req)
-			return committedModelStream(ctx, req, stream)
+				h.observeTools(req.Tools)
+				req = withoutSettlementMarker(req)
+				h.observeDiscoveredSchemas(req)
+				h.observeSettlement(req.Messages)
+				return committedModelStream(ctx, req, stream)
 		}
 	}
 	if complete != nil {
@@ -325,27 +344,28 @@ func (h *dispatchHooks) observeModelCalls(opts *agentcore.Options) {
 			if err := intentInputRetryError(ctx); err != nil {
 				return llm.Message{}, "", llm.Usage{}, err
 			}
-			if h.builtins != nil {
-				settling := h.phaseTargets != nil
-				for _, schema := range req.Tools {
-					if schema.Name == settlementMarkerName {
-						settling = false
+				if h.builtins != nil {
+					settling := h.phaseTargets != nil
+					for _, schema := range req.Tools {
+						if schema.Name == settlementMarkerName {
+							settling = false
+						}
+					}
+					var err error
+					req, err = h.builtins.project(ctx, req, settling)
+					if err != nil {
+						return llm.Message{}, "", llm.Usage{}, err
 					}
 				}
-				var err error
-				req, err = h.builtins.project(ctx, req, settling)
-				if err != nil {
-					return llm.Message{}, "", llm.Usage{}, err
+				req = h.projectToolDocumentation(req)
+				if h.builtins != nil {
+					req = h.builtins.applyPressure(req)
 				}
-			}
-			req = h.projectToolDocumentation(req)
-			if h.builtins != nil {
-				req = h.builtins.applyPressure(req)
-			}
-			h.observeTools(req.Tools)
-			req = withoutSettlementMarker(req)
-			h.observeDiscoveredSchemas(req)
-			callCtx, release, err := acquireModelRequest(ctx, runtimebudget.ModelGate(), false)
+				h.observeTools(req.Tools)
+				req = withoutSettlementMarker(req)
+				h.observeDiscoveredSchemas(req)
+				h.observeSettlement(req.Messages)
+				callCtx, release, err := acquireModelRequest(ctx, runtimebudget.ModelGate(), false)
 			if err != nil {
 				return llm.Message{}, "", llm.Usage{}, err
 			}
@@ -355,6 +375,92 @@ func (h *dispatchHooks) observeModelCalls(opts *agentcore.Options) {
 		}
 	}
 }
+
+// observeRequest records what the loop actually sent: the tool surface (used to
+// reject calls that are not part of the current request) and whether the SDK has
+// just injected its wrap-up prompt.
+func (h *dispatchHooks) observeRequest(req llm.CompletionRequest) {
+	h.observeTools(req.Tools)
+	h.observeSettlement(req.Messages)
+}
+
+// watchSettlement arms the wrap-up gate. guard is code-owned policy (the caller
+// passes it explicitly), so an admin editing the wrap-up prompt cannot disable it.
+// No-op when the run has no settlement prompt or nothing to guard.
+func (h *dispatchHooks) watchSettlement(s *harness.Settlement, guard ...string) {
+	if s == nil || len(guard) == 0 {
+		return
+	}
+	prompts := settlementPrompts(s)
+	if len(prompts) == 0 {
+		return
+	}
+	h.settlePrompts = prompts
+	h.settleGuard = make(map[string]bool, len(guard))
+	h.settleNames = make([]string, 0, len(guard))
+	for _, name := range guard {
+		if h.settleGuard[name] {
+			continue
+		}
+		h.settleGuard[name] = true
+		h.settleNames = append(h.settleNames, name)
+	}
+}
+
+// observeSettlement latches "the run is wrapping up" the first time the loop sends
+// the wrap-up prompt as the trailing user turn. The SDK appends that text verbatim
+// (harness/query.go: beginSettlement → llm.UserText(prompt)), so matching it is
+// exact and needs no marker inside the prompt. A prefix match covers SDKs that pad
+// the injected text.
+func (h *dispatchHooks) observeSettlement(msgs []llm.Message) {
+	if h.settling.Load() || len(h.settlePrompts) == 0 || len(msgs) == 0 {
+		return
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != llm.RoleUser {
+		return
+	}
+	text := strings.TrimSpace(messageText(last))
+	if text == "" {
+		return
+	}
+	for _, p := range h.settlePrompts {
+		if text == p || (len(p) >= 32 && strings.HasPrefix(text, headRunes(p, 32))) {
+			h.settling.Store(true)
+			log.Printf("[settlement] 收尾相位已识别：拒绝执行 %v（工具清单保持不变，保住前缀缓存）", h.settleNames)
+			return
+		}
+	}
+}
+
+// messageText concatenates the text blocks of one message.
+func messageText(m llm.Message) string {
+	var b strings.Builder
+	for _, c := range m.Content {
+		if c.Type == llm.BlockText {
+			b.WriteString(c.Text)
+		}
+	}
+	return b.String()
+}
+
+// headRunes returns the first n runes of s (byte-safe for multi-byte prompts).
+func headRunes(s string, n int) string {
+	i := 0
+	for pos := range s {
+		if i == n {
+			return s[:pos]
+		}
+		i++
+	}
+	return s
+}
+
+// settlementDenied explains a refused call in terms the model can act on: write
+// findings back with the report/asset/fact tools, then summarise and stop.
+const settlementDenied = "已进入收尾相位（本轮预算已用完）：不能再执行 %s。请立即用落库工具把已有结论写回" +
+	"（record_fact / insert_assets / report_finding / RecordMemory），然后单独用一句话总结；" +
+	"重复调用 %s 会被同样拒绝。"
 
 func (h *dispatchHooks) observeTools(schemas []llm.ToolSchema) {
 	visible := make(map[string]bool, len(schemas))
@@ -439,6 +545,12 @@ func (h *dispatchHooks) PreToolUse(ctx context.Context, outer string, input []by
 	if err != nil {
 		return true, err.Error(), nil
 	}
+	// Wrap-up gate: the tool stays declared (so the request prefix never changes and
+	// the provider cache survives) but cannot be executed once the SDK injected its
+	// wrap-up prompt. settleGuard is immutable after watchSettlement, so no lock.
+	if h.settling.Load() && h.settleGuard[name] {
+		return true, fmt.Sprintf(settlementDenied, name, name), nil
+	}
 	h.viewMu.RLock()
 	hidden := outer == settlementMarkerName || (h.visible != nil && !h.visible[outer] && !h.deferred[outer])
 	phaseBlocked := h.visible != nil && h.phaseTargets[name] && !h.visible[settlementMarkerName]
@@ -478,9 +590,6 @@ func (h *dispatchHooks) PreToolUse(ctx context.Context, outer string, input []by
 	}
 	params, err = validate(params)
 	if err != nil {
-		if name == "add_intent" {
-			return true, intentInputError(err.Error()), nil
-		}
 		return true, "invalid tool input: " + err.Error(), nil
 	}
 	if outer == actool.ExecuteExtraToolName {
@@ -531,7 +640,16 @@ func (h *dispatchHooks) PreToolUse(ctx context.Context, outer string, input []by
 }
 
 func (h *dispatchHooks) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
-	if h.builtins != nil && !isErr {
+	if isErr {
+		// Host-level error distillation runs before the inner hook so the
+		// lesson is recorded even if the inner hook returns early. The
+		// recorder is a no-op when ConfigureHostLessons has not been called.
+		if target, params, err := h.target(name, input); err == nil {
+			RecordHostLesson(target, params, result)
+		} else {
+			RecordHostLesson(name, input, result)
+		}
+	} else if h.builtins != nil {
 		if target, _, err := h.target(name, input); err == nil {
 			h.builtins.used(target)
 		}
