@@ -151,3 +151,21 @@ func (o *overriddenTool) Call(ctx context.Context, in json.RawMessage, tc *actoo
 	}
 	return o.CoreTool.Call(ctx, resolved, tc)
 }
+
+// promptOverrideTool replaces a tool's extended Prompt text. norma renders the
+// provider-facing description as Description() + "\n\n" + Prompt() (see
+// Registry.Schemas), so overriding Prompt() is the only SERIES-side seam for
+// dropping or rewording guidance that only exists inside the SDK module.
+type promptOverrideTool struct {
+	actool.CoreTool
+	prompt string
+}
+
+// OverrideToolPrompt returns t with its extended Prompt replaced by prompt
+// (empty = no extended text at all). Everything else, including Call and
+// PrepareInput, keeps delegating to t.
+func OverrideToolPrompt(t actool.CoreTool, prompt string) actool.CoreTool {
+	return &promptOverrideTool{CoreTool: t, prompt: prompt}
+}
+
+func (p *promptOverrideTool) Prompt() string { return p.prompt }
